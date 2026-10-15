@@ -74,29 +74,61 @@ function normalize(row) {
   };
 }
 
+// The API returns recurring clock times (HH:MM) without a calendar date.
+// Treat a time that has passed today as the next occurrence tomorrow, rather
+// than dropping it and incorrectly saying there are no nearby minyanim.
+function orderForNextOccurrence(items) {
+  const now = nowIsrael();
+  return items.map(m => {
+    if (m.mins === null) {
+      return { ...m, nextDay: false, minutesUntilNext: null };
+    }
+    const difference = m.mins - now;
+    const nextDay = difference < -5;
+    const minutesUntilNext = nextDay ? difference + 1440 : Math.max(0, difference);
+    return { ...m, nextDay, minutesUntilNext };
+  }).sort((a, b) =>
+    (a.minutesUntilNext ?? 9999) - (b.minutesUntilNext ?? 9999) ||
+    a.distance - b.distance
+  );
+}
+
 export async function fetchMinyanim(lat, lng, radiusKm) {
   const key = `${lat.toFixed(3)},${lng.toFixed(3)},${radiusKm}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.t < CACHE_MS) return hit.v;
+  let usable;
+  if (hit && Date.now() - hit.t < CACHE_MS) {
+    usable = hit.v;
+  } else {
+    const text = await fetchRaw(lat, lng, radiusKm);
+    let json;
+    try { json = JSON.parse(text); }
+    catch { throw new Error('nedarim: not JSON: ' + text.slice(0, 200)); }
 
-  const text = await fetchRaw(lat, lng, radiusKm);
-  let json;
-  try { json = JSON.parse(text); }
-  catch { throw new Error('nedarim: not JSON: ' + text.slice(0, 200)); }
+    const rows = findArray(json);
+    if (!rows) throw new Error('nedarim: no array in response: ' + text.slice(0, 300));
+    if (rows.length && !hhmm(JSON.stringify(rows[0]))) {
+      console.warn('nedarim: no time field recognised, sample keys:', Object.keys(rows[0]).join(','));
+    }
 
-  const rows = findArray(json);
-  if (!rows) throw new Error('nedarim: no array in response: ' + text.slice(0, 300));
-  if (rows.length && !hhmm(JSON.stringify(rows[0]))) {
-    console.warn('nedarim: no time field recognised, sample row:', JSON.stringify(rows[0]).slice(0, 300));
+    usable = rows.map(normalize).filter(m => m.place || m.time);
+    console.log('minyan search response', {
+      rawRows: rows.length,
+      usableRows: usable.length,
+      radiusKm: Math.max(0, Number(radiusKm) || 0) <= 0 ? 0 :
+        (Number(radiusKm) <= 0.5 ? 0.5 : 1),
+      usingRecurringTimes: ONLY_UPCOMING
+    });
+    cache.set(key, { t: Date.now(), v: usable });
   }
 
-  let list = rows.map(normalize).filter(m => m.place || m.time);
-  if (ONLY_UPCOMING) {
-    const now = nowIsrael();
-    list = list.filter(m => m.mins === null || m.mins >= now - 5);
-  }
-  list.sort((a, b) => (a.mins ?? 9999) - (b.mins ?? 9999) || a.distance - b.distance);
+  const list = ONLY_UPCOMING
+    ? orderForNextOccurrence(usable)
+    : [...usable].sort((a, b) => (a.mins ?? 9999) - (b.mins ?? 9999) || a.distance - b.distance);
 
-  cache.set(key, { t: Date.now(), v: list });
+  console.log('minyan search results', {
+    returnedRows: list.length,
+    nextDayRows: list.filter(m => m.nextDay).length
+  });
   return list;
 }
