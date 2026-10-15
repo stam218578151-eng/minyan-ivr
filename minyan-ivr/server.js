@@ -117,7 +117,7 @@ const ivrHandler = async (req, res) => {
   try {
     const filePath = recordingPath(latest.value);
     const audio = await download(filePath);
-    const transcript = await transcribe(audio);
+    const transcript = String((await transcribe(audio)) ?? '').trim();
     console.log('speech transcription completed', {
       hasText: Boolean(transcript),
       characterCount: transcript.length,
