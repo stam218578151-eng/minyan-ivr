@@ -39,7 +39,8 @@ app.get('/debug', async (req, res) => {
 
 app.get('/ivr', async (req, res) => {
   res.type('text/plain; charset=utf-8');
-  console.log('ivr query:', req.query); // לבדיקה: שם המשתנה והנתיב שימות שולחים
+  // Do not log raw query parameters: they can contain Yemot credentials.
+  console.log('ivr request received', { hasCallId: Boolean(req.query.ApiCallId), hasVoiceFile: Boolean(req.query.voiceFile) });
   const { ApiCallId: id = Date.now(), voiceFile } = req.query;
 
   if (!voiceFile) {
