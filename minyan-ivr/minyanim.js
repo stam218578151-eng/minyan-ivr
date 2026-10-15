@@ -1,7 +1,7 @@
 // שליפת מניינים מנדרים פלוס (פרויקט זמני תפילות הארצי).
-// The public GetNearestMinyan endpoint accepts radius values 500 or 1000 (meters),
-// not arbitrary distances. The app configuration stays in kilometers and maps to a
-// supported radius to avoid the endpoint's "Wrong radius" response.
+// GetNearestMinyan accepts discrete radius values in kilometers (0, 0.5, or 1).
+// Map this app's configurable kilometer radius to the largest supported value not
+// exceeding the requested search size; larger values caused "Wrong radius".
 const BASE = 'https://www.matara.pro/nedarimplus/Zmanim/Manage.aspx';
 const ONLY_UPCOMING = process.env.ONLY_UPCOMING !== 'false';
 const CACHE_MS = 5 * 60 * 1000;
@@ -9,9 +9,9 @@ const cache = new Map();
 
 // הבקשה הגולמית - משמשת גם את /debug כדי לראות מה נדרים מחזירים
 export async function fetchRaw(lat, lng, radiusKm) {
-  const requestedMeters = Math.max(0, Math.round(Number(radiusKm) * 1000));
-  const radiusMeters = requestedMeters === 0 ? 0 : (requestedMeters <= 500 ? 500 : 1000);
-  const url = `${BASE}?Action=GetNearestMinyan&lat=${lat}&lng=${lng}&radius=${radiusMeters}&_=${Date.now()}`;
+  const requestedKm = Math.max(0, Number(radiusKm) || 0);
+  const supportedRadiusKm = requestedKm === 0 ? 0 : (requestedKm <= 0.5 ? 0.5 : 1);
+  const url = `${BASE}?Action=GetNearestMinyan&lat=${lat}&lng=${lng}&radius=${supportedRadiusKm}&_=${Date.now()}`;
   const r = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 minyan-ivr', Accept: 'application/json, text/plain, */*' },
     signal: AbortSignal.timeout(8000)
