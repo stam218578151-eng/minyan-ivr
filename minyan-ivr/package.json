@@ -4,7 +4,7 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "prestart": "node inspect-yemot.js",
+    "prestart": "node inspect-yemot-extensions.js",
     "start": "node server.js"
   },
   "engines": { "node": ">=20" },
