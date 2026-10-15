@@ -59,8 +59,12 @@ if (firstPoint) {
     console.log('CALLER_SMOKE_MINYANIM=' + JSON.stringify({
       ok: Array.isArray(minyanim),
       count: Array.isArray(minyanim) ? minyanim.length : 0,
-      hasSpeakableFields: Array.isArray(minyanim) && minyanim.every(x =>
-        typeof x === 'object' && typeof x.place === 'string' && typeof x.time === 'string')
+      usableCount: Array.isArray(minyanim) ? minyanim.filter(x => x.place?.trim() && x.time?.trim()).length : 0,
+      sample: Array.isArray(minyanim) ? minyanim.slice(0, 3).map(x => ({
+        type: x.type || 'מניין',
+        time: x.time || 'לא ידועה',
+        hasPlace: Boolean(x.place?.trim())
+      })) : []
     }));
   } catch (error) {
     console.log('CALLER_SMOKE_MINYANIM=' + JSON.stringify({ ok: false, error: String(error).slice(0, 160) }));
