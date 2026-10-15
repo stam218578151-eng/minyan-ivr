@@ -11,9 +11,26 @@ const MAX_RESULTS = Number(process.env.MAX_RESULTS || 6);
 const clean = s => String(s ?? '').replace(/[&=,.\-]/g, ' ').replace(/\s+/g, ' ').trim();
 const say = t => `id_list_message=t-${clean(t)}&go_to_folder=hangup`;
 
-// TODO: לאמת מול תיעוד ימות את סדר הפרמטרים של read במצב record
+// תיעוד ימות: read=הודעה=שם_פרמטר,,record,תיקייה,שם_קובץ,no,yes,no,מינימום,מקסימום
+const safeFilePart = value => String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 70) || String(Date.now());
 const ask = (prompt, varName, file) =>
-  `read=t-${clean(prompt)}=${varName},no,record,/ApiRecords,${file},no,yes,no,1,8`;
+  `read=t-${clean(prompt)}=${varName},,record,/1,${safeFilePart(file)},no,yes,no,1,20`;
+
+// ערך ההקלטה מימות עשוי להגיע כנתיב מלא או כשם קובץ בלבד.
+// בהקלטה שמורה לשלוחה /1, נתיב יחסי מפורש מתפרש ביחס לשלוחה זו.
+function recordingPath(value) {
+  let p = String(value ?? '').trim();
+  if (!p) throw new Error('Missing voiceFile recording path');
+  p = p.replace(/^ivr2:/i, '').split(/[?#]/, 1)[0].replace(/\\/g, '/');
+  p = p.replace(/^\/+/, '');
+  const parts = p.split('/').filter(Boolean);
+  if (!parts.length || parts.some(part => part === '.' || part === '..')) {
+    throw new Error('Invalid voiceFile recording path');
+  }
+  if (!p.includes('/')) p = `1/${p}`;
+  if (!/\.(wav|ogg|mp3)$/i.test(p)) p += '.wav';
+  return `/${p}`;
+}
 
 async function download(path) {
   const url = 'https://www.call2all.co.il/ym/api/DownloadFile?token=' +
@@ -48,8 +65,9 @@ app.get('/ivr', async (req, res) => {
   }
 
   try {
-    const text = await transcribe(await download(voiceFile));
-    console.log('transcript:', text);
+    const filePath = recordingPath(voiceFile);
+    const audio = await download(filePath);
+    const text = await transcribe(audio);
     if (!text) return res.send(say('לא הצלחנו להבין, נסו שוב'));
 
     const pos = await geocode(text);
