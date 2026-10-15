@@ -95,7 +95,11 @@ const ivrHandler = async (req, res) => {
     res.send(say(`נמצאו ${list.length} מניינים. ${body}`));
   } catch (e) {
     console.error(e);
-    res.send(say('אירעה שגיאה, נסו שוב מאוחר יותר'));
+    if (String(e?.message ?? e).includes('Geocoding providers unavailable')) {
+      res.send(say('שירות איתור הכתובות אינו זמין כרגע. נסו שוב בעוד דקה'));
+    } else {
+      res.send(say('אירעה שגיאה, נסו שוב מאוחר יותר'));
+    }
   }
 };
 
