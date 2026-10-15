@@ -1,5 +1,6 @@
-// שליפת מניינים מנדרים פלוס (פרויקט זמני תפילות הארצי)
-// endpoint לא מתועד רשמית: Manage.aspx?Action=GetNearestMinyan&lat=..&lng=..&radius=<ק"מ>
+// שליפת מניינים מנדרים פלוס (פרויקט זמני תפילות הארצי).
+// GetNearestMinyan expects radius in METERS (the public map offers 500/1000m),
+// while this app's RADIUS_KM configuration is kept in kilometers.
 const BASE = 'https://www.matara.pro/nedarimplus/Zmanim/Manage.aspx';
 const ONLY_UPCOMING = process.env.ONLY_UPCOMING !== 'false';
 const CACHE_MS = 5 * 60 * 1000;
@@ -7,7 +8,8 @@ const cache = new Map();
 
 // הבקשה הגולמית - משמשת גם את /debug כדי לראות מה נדרים מחזירים
 export async function fetchRaw(lat, lng, radiusKm) {
-  const url = `${BASE}?Action=GetNearestMinyan&lat=${lat}&lng=${lng}&radius=${radiusKm}&_=${Date.now()}`;
+  const radiusMeters = Math.max(0, Math.round(Number(radiusKm) * 1000));
+  const url = `${BASE}?Action=GetNearestMinyan&lat=${lat}&lng=${lng}&radius=${radiusMeters}&_=${Date.now()}`;
   const r = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 minyan-ivr', Accept: 'application/json, text/plain, */*' },
     signal: AbortSignal.timeout(8000)
