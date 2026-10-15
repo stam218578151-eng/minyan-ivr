@@ -4,6 +4,9 @@ import { geocode } from './geocode.js';
 import { fetchMinyanim, fetchRaw } from './minyanim.js';
 
 const app = express();
+// Yemot's API module may send either GET (default) or POST (api_url_post=yes).
+app.use(express.urlencoded({ extended: false, limit: '32kb' }));
+app.use(express.json({ limit: '32kb' }));
 const RADIUS_KM = Number(process.env.RADIUS_KM || 2);
 const MAX_RESULTS = Number(process.env.MAX_RESULTS || 6);
 
@@ -54,11 +57,14 @@ app.get('/debug', async (req, res) => {
   }
 });
 
-app.get('/ivr', async (req, res) => {
+const ivrHandler = async (req, res) => {
   res.type('text/plain; charset=utf-8');
-  // Do not log raw query parameters: they can contain Yemot credentials.
-  console.log('ivr request received', { hasCallId: Boolean(req.query.ApiCallId), hasVoiceFile: Boolean(req.query.voiceFile) });
-  const { ApiCallId: id = Date.now(), voiceFile } = req.query;
+  // Accept both GET query parameters and form/JSON POST bodies; never log raw credentials.
+  const params = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
+  const getParam = name => params[name] ?? params[Object.keys(params).find(k => k.toLowerCase() === name.toLowerCase())];
+  const id = getParam('ApiCallId') ?? Date.now();
+  const voiceFile = getParam('voiceFile');
+  console.log('ivr request received', { method: req.method, hasCallId: Boolean(getParam('ApiCallId')), hasVoiceFile: Boolean(voiceFile) });
 
   if (!voiceFile) {
     return res.send(ask('אמרו את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית', 'voiceFile', `addr_${id}`));
@@ -84,6 +90,10 @@ app.get('/ivr', async (req, res) => {
     console.error(e);
     res.send(say('אירעה שגיאה, נסו שוב מאוחר יותר'));
   }
-});
+};
+
+// Support both Yemot API settings, including a legacy api_url_post=yes.
+app.get('/ivr', ivrHandler);
+app.post('/ivr', ivrHandler);
 
 app.listen(process.env.PORT || 3000);
