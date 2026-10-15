@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: minyan-ivr
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: YM_TOKEN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: RADIUS_KM
+        value: "2"
+      - key: DEBUG_KEY
+        sync: false
