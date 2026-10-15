@@ -21,7 +21,7 @@ const ask = (prompt, varName, file) =>
 
 // בקשת הקשה: 1 לאישור, 2 להקלטה מחדש. מגבילים לספרה אחת ומאפשרים רק 1 או 2.
 const askKey = (prompt, varName) =>
-  `read=t-${clean(prompt)}=${varName},no,1,1,7,No,yes,yes,,1.2`;
+  `read=t-${clean(prompt)}=${varName},,1,1,,Digits,yes,yes,,12,,,,InsertLettersTypeChangeNo,no`;
 
 // ערך ההקלטה מימות עשוי להגיע כנתיב מלא או כשם קובץ בלבד.
 // בהקלטה שמורה לשלוחה /1, נתיב יחסי מפורש מתפרש ביחס לשלוחה זו.
