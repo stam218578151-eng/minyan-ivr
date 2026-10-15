@@ -158,9 +158,14 @@ const ivrHandler = async (req, res) => {
     }
 
     const body = list.slice(0, MAX_RESULTS)
-      .map(m => (m.type || 'מניין') + ' בשעה ' + (m.time || 'לא ידועה') + (m.place ? ' ב' + m.place : ''))
+      .map(m => {
+        const when = m.time
+          ? (m.nextDay ? ' מחר בשעה ' : ' היום בשעה ') + m.time
+          : ' בשעה לא ידועה';
+        return (m.type || 'מניין') + when + (m.place ? ' ב' + m.place : '');
+      })
       .join('. ');
-    res.send(say('נמצאו ' + list.length + ' מניינים. ' + body));
+    res.send(say('נמצאו ' + list.length + ' מניינים באזור. ' + body));
   } catch (e) {
     console.error(e);
     if (String(e?.message ?? e).includes('Geocoding providers unavailable')) {
