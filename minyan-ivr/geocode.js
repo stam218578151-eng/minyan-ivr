@@ -1,14 +1,159 @@
-// טקסט חופשי ("הרצל חיפה") -> קואורדינטות (OpenStreetMap Nominatim, עד בקשה אחת בשנייה)
+// Israeli street geocoding with a primary Nominatim lookup and Photon fallback.
+// Nominatim's public service requires a maximum of one request per second per application.
+const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
+const PHOTON = 'https://photon.komoot.io/api/';
+const REQUEST_TIMEOUT_MS = 7000;
+const ISRAEL = { minLat: 29.2, maxLat: 33.5, minLng: 34.1, maxLng: 35.9 };
+
+let lastNominatimStartedAt = 0;
+let nominatimQueue = Promise.resolve();
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function normalizeAddress(value) {
+  return String(value ?? '')
+    .normalize('NFC')
+    .replace(/[\u200e\u200f\u202a-\u202e]/g, '')
+    .replace(/[#*]+$/g, ' ')
+    .replace(/[!?;:"'״׳]/g, ' ')
+    .replace(/[،]/g, ',')
+    .replace(/\s+/g, ' ')
+    .replace(/^\s*(?:הכתובת היא|אני נמצא ב|אני גר ב|בכתובת)\s+/g, '')
+    .trim();
+}
+
+function isIsraeliPoint(lat, lng, properties = {}) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  const cc = String(properties.countrycode ?? properties.country_code ?? '').toLowerCase();
+  const country = String(properties.country ?? '').toLowerCase();
+  if (cc === 'il' || country === 'israel' || country === 'ישראל') return true;
+  return lat >= ISRAEL.minLat && lat <= ISRAEL.maxLat &&
+    lng >= ISRAEL.minLng && lng <= ISRAEL.maxLng;
+}
+
+function pointFromNominatim(row) {
+  const lat = Number(row?.lat);
+  const lng = Number(row?.lon);
+  if (!isIsraeliPoint(lat, lng, row?.address ?? {})) return null;
+  return { lat, lng };
+}
+
+function pointFromPhoton(feature) {
+  const coords = feature?.geometry?.coordinates;
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+  const lng = Number(coords[0]);
+  const lat = Number(coords[1]);
+  if (!isIsraeliPoint(lat, lng, feature?.properties ?? {})) return null;
+  return { lat, lng };
+}
+
+async function serializedNominatimFetch(url) {
+  const run = async () => {
+    const waitMs = Math.max(0, 1100 - (Date.now() - lastNominatimStartedAt));
+    if (waitMs) await sleep(waitMs);
+    lastNominatimStartedAt = Date.now();
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'minyan-ivr/1.1 (Israeli minyan phone line; contact via GitHub repository)',
+        'Accept-Language': 'he,en'
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+    });
+    if (!response.ok) throw new Error('Nominatim HTTP ' + response.status);
+    return response.json();
+  };
+  const result = nominatimQueue.then(run, run);
+  nominatimQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function searchNominatim(query) {
+  const url = new URL(NOMINATIM);
+  url.search = new URLSearchParams({
+    format: 'jsonv2',
+    limit: '3',
+    addressdetails: '1',
+    countrycodes: 'il',
+    'accept-language': 'he,en',
+    q: query
+  }).toString();
+  try {
+    const rows = await serializedNominatimFetch(url);
+    return { ok: true, point: (Array.isArray(rows) ? rows : []).map(pointFromNominatim).find(Boolean) ?? null };
+  } catch (error) {
+    console.warn('geocode provider unavailable', { provider: 'nominatim', error: String(error).slice(0, 100) });
+    return { ok: false, point: null };
+  }
+}
+
+async function searchPhoton(query) {
+  const url = new URL(PHOTON);
+  url.search = new URLSearchParams({ q: query, lang: 'he', limit: '5' }).toString();
+  try {
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'minyan-ivr/1.1', Accept: 'application/geo+json, application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+    });
+    if (!response.ok) throw new Error('Photon HTTP ' + response.status);
+    const data = await response.json();
+    const features = Array.isArray(data?.features) ? data.features : [];
+    return { ok: true, point: features.map(pointFromPhoton).find(Boolean) ?? null };
+  } catch (error) {
+    console.warn('geocode provider unavailable', { provider: 'photon', error: String(error).slice(0, 100) });
+    return { ok: false, point: null };
+  }
+}
+
+// The phone prompt requests city first and street second. Free-form search is attempted first;
+// explicit city/street separators are tried only when that doesn't find a point.
+function queryCandidates(query) {
+  const words = query.split(' ').filter(Boolean);
+  const candidates = [query];
+  for (let cityWords = 1; cityWords <= Math.min(3, words.length - 1); cityWords++) {
+    candidates.push(words.slice(0, cityWords).join(' ') + ', ' + words.slice(cityWords).join(' '));
+  }
+  if (words.length >= 3) {
+    const city = words.slice(0, 2).join(' ');
+    const street = words.slice(2).join(' ');
+    candidates.push(street + ', ' + city);
+  }
+  return [...new Set(candidates.map(x => x.trim()).filter(Boolean))];
+}
+
 export async function geocode(text) {
-  const q = String(text).replace(/[.,!?;:"']/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!q) return null;
-  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1' +
-    '&countrycodes=il&accept-language=he&q=' + encodeURIComponent(`${q}, ישראל`);
-  const r = await fetch(url, {
-    headers: { 'User-Agent': 'minyan-ivr/1.0 (personal IVR project)' },
-    signal: AbortSignal.timeout(8000)
-  });
-  if (!r.ok) throw new Error(`geocode ${r.status}`);
-  const j = await r.json();
-  return j.length ? { lat: +j[0].lat, lng: +j[0].lon } : null;
+  const q = normalizeAddress(text);
+  if (!q || q.length < 3) return null;
+
+  const candidates = queryCandidates(q);
+  let providersResponded = 0;
+
+  // First pass: use Nominatim's free-form interpretation of the entire spoken address.
+  const first = await searchNominatim(candidates[0]);
+  if (first.ok) providersResponded++;
+  if (first.point) {
+    console.log('geocode matched', { provider: 'nominatim', candidate: 1 });
+    return first.point;
+  }
+
+  // Independent OpenStreetMap-backed provider for Hebrew spelling/ordering differences.
+  const photon = await searchPhoton(q);
+  if (photon.ok) providersResponded++;
+  if (photon.point) {
+    console.log('geocode matched', { provider: 'photon', candidate: 1 });
+    return photon.point;
+  }
+
+  // Try city/street boundaries; calls are queued to respect Nominatim's public rate limit.
+  for (let i = 1; i < candidates.length; i++) {
+    const attempt = await searchNominatim(candidates[i]);
+    if (attempt.ok) providersResponded++;
+    if (attempt.point) {
+      console.log('geocode matched', { provider: 'nominatim', candidate: i + 1 });
+      return attempt.point;
+    }
+  }
+
+  console.log('geocode no match', { wordCount: q.split(/\s+/).length, candidatesTried: candidates.length });
+  if (providersResponded === 0) throw new Error('Geocoding providers unavailable');
+  return null;
 }
