@@ -94,7 +94,7 @@ function addressLookupFor(transcript) {
 }
 
 const ask = (prompt, varName, file) =>
-  `read=t-${clean(prompt)}=${varName},yes,record,/1,${safeFilePart(file)},no,yes,no,1,20&`;
+  `read=t-${clean(prompt)}=${varName},,record,/1,${safeFilePart(file)},no,yes,no,1,20&`;
 
 // Yemot's documented read schema: variable,yes,maxDigits,minDigits,timeout,Digits,yes&.
 // The explicit timeout field is required before Digits; only one digit is accepted.
