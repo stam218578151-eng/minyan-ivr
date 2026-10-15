@@ -74,10 +74,17 @@ const ivrHandler = async (req, res) => {
     const filePath = recordingPath(voiceFile);
     const audio = await download(filePath);
     const text = await transcribe(audio);
-    if (!text) return res.send(say('לא הצלחנו להבין, נסו שוב'));
+    console.log('speech transcription completed', {
+      hasText: Boolean(text),
+      characterCount: text.length,
+      wordCount: text ? text.split(/\\s+/).filter(Boolean).length : 0
+    });
+    if (!text) return res.send(say('לא הצלחנו להבין את ההקלטה. אמרו שוב את שם העיר ואחריו שם הרחוב, וסיימו בסולמית'));
 
     const pos = await geocode(text);
-    if (!pos) return res.send(say('לא מצאנו את הכתובת, נסו שוב'));
+    if (!pos) {
+      return res.send(say('לא הצלחנו לזהות את העיר והרחוב. אמרו שוב את שם העיר ואחריו שם הרחוב, לדוגמה בני ברק רבי עקיבא, וסיימו בסולמית'));
+    }
 
     const list = await fetchMinyanim(pos.lat, pos.lng, RADIUS_KM);
     if (!list.length) return res.send(say('לא נמצאו מניינים באזור'));
