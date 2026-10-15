@@ -1,12 +1,28 @@
 import express from 'express';
 import { transcribe } from './stt.js';
-import { geocode } from './geocode.js';
+import { geocode, normalizeAddress } from './geocode.js';
 import { fetchMinyanim, fetchRaw } from './minyanim.js';
 
 const app = express();
 // Yemot's API module may send either GET (default) or POST (api_url_post=yes).
 app.use(express.urlencoded({ extended: false, limit: '32kb' }));
 app.use(express.json({ limit: '32kb' }));
+// Keep request duration/status telemetry so API timeouts can be distinguished
+// from a response-format problem. Do not log caller audio paths or phone numbers.
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    console.log('http response completed', {
+      method: req.method,
+      path: req.path,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt,
+      contentType: res.getHeader('content-type') ?? null,
+      contentLength: res.getHeader('content-length') ?? null
+    });
+  });
+  next();
+});
 const RADIUS_KM = Number(process.env.RADIUS_KM || 2);
 const MAX_RESULTS = Number(process.env.MAX_RESULTS || 6);
 
@@ -27,6 +43,56 @@ const say = t => {
 
 // תיעוד ימות: read=הודעה=שם_פרמטר,,record,תיקייה,שם_קובץ,no,yes,no,מינימום,מקסימום
 const safeFilePart = value => String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 70) || String(Date.now());
+
+// Cache the same recording's transcription between the record and confirm callbacks.
+// Pre-resolve the address while the caller hears the read-back prompt.
+const TRANSCRIPT_CACHE_MS = 5 * 60 * 1000;
+const ADDRESS_CACHE_MS = 5 * 60 * 1000;
+const transcriptCache = new Map();
+const addressLookupCache = new Map();
+
+async function transcriptFor(key, filePath) {
+  const existing = transcriptCache.get(key);
+  if (existing && existing.expiresAt > Date.now()) return existing.promise;
+  const entry = {
+    expiresAt: Date.now() + TRANSCRIPT_CACHE_MS,
+    promise: (async () => {
+      const audio = await download(filePath);
+      return String((await transcribe(audio)) ?? '').trim();
+    })()
+  };
+  transcriptCache.set(key, entry);
+  entry.promise.catch(() => {
+    if (transcriptCache.get(key) === entry) transcriptCache.delete(key);
+  });
+  return entry.promise;
+}
+
+function addressLookupFor(transcript) {
+  const key = normalizeAddress(transcript).toLocaleLowerCase('he-IL');
+  if (!key) return Promise.resolve({ pos: null });
+  const existing = addressLookupCache.get(key);
+  if (existing && existing.expiresAt > Date.now()) return existing.promise;
+
+  const entry = {
+    expiresAt: Date.now() + ADDRESS_CACHE_MS,
+    promise: geocode(transcript).then(
+      pos => ({ pos }),
+      error => ({ error: String(error?.message ?? error) })
+    )
+  };
+  addressLookupCache.set(key, entry);
+  entry.promise.then(result => {
+    if (addressLookupCache.get(key) !== entry) return;
+    if (result.pos) {
+      entry.expiresAt = Date.now() + ADDRESS_CACHE_MS;
+    } else {
+      addressLookupCache.delete(key);
+    }
+  });
+  return entry.promise;
+}
+
 const ask = (prompt, varName, file) =>
   `read=t-${clean(prompt)}=${varName},,record,/1,${safeFilePart(file)},no,yes,no,1,20`;
 
@@ -73,7 +139,7 @@ app.get('/debug', async (req, res) => {
 });
 
 const ivrHandler = async (req, res) => {
-  res.type('text/plain; charset=utf-8');
+  res.set('Content-Type', 'text/plain; charset=utf-8');
   // Yemot repeats all previously collected values in each read callback.
   const params = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
   const getParam = name => params[name] ?? params[Object.keys(params).find(k => k.toLowerCase() === name.toLowerCase())];
@@ -127,8 +193,10 @@ const ivrHandler = async (req, res) => {
 
   try {
     const filePath = recordingPath(latest.value);
-    const audio = await download(filePath);
-    const transcript = String((await transcribe(audio)) ?? '').trim();
+    // ApiCallId is stable across callbacks within the same call. Include the
+    // recording name so a retry cannot reuse another recording's transcript.
+    const transcriptKey = String(id) + ':' + attempt + ':' + String(latest.value);
+    const transcript = await transcriptFor(transcriptKey, filePath);
     console.log('speech transcription completed', {
       hasText: Boolean(transcript),
       characterCount: transcript.length,
@@ -148,13 +216,18 @@ const ivrHandler = async (req, res) => {
     // stored audio again, then proceed with address lookup.
     if (!hasConfirmation) {
       const heard = clean(transcript).slice(0, 180);
+      // Start geocoding now without delaying the spoken confirmation prompt.
+      // The result is awaited only if the caller confirms the address.
+      void addressLookupFor(transcript);
       return res.send(askKey(
         'שמעתי ' + heard + '. אם הכתובת נכונה הקישו 1. להקלטה מחדש הקישו 2',
         confirmParam
       ));
     }
 
-    const pos = await geocode(transcript);
+    const lookup = await addressLookupFor(transcript);
+    if (lookup.error) throw new Error(lookup.error);
+    const pos = lookup.pos;
     if (!pos) {
       return res.send(ask(
         'לא הצלחתי לאתר את הכתובת שאישרתם. אנא הקליטו שוב את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית',
