@@ -20,6 +20,7 @@ function normalizeAddress(value) {
     .replace(/\s+/g, ' ')
     // Remove common spoken framing and the caller's spoken end marker, not street/city names.
     .replace(/^\s*(?:הכתובת היא|הכתובת|בכתובת|המיקום שלי|אני נמצא|אני נמצאת|אני גר|אני גרה|המקום הוא|העיר היא)\s+(?:בעיר\s+)?/g, '')
+    .replace(/(^|\s)(?:ברחוב|רחוב)\s+/g, '$1')
     .replace(/\s+(?:סיימתי בסולמית|סיימו בסולמית|ואסיים בסולמית|בסולמית|עם סולמית|סולמית|כוכבית|סיימתי|סיימו|זה הכל|זהו|תודה)\s*$/g, '')
     .trim();
 }
@@ -90,7 +91,9 @@ async function searchNominatim(query) {
 
 async function searchPhoton(query) {
   const url = new URL(PHOTON);
-  url.search = new URLSearchParams({ q: query, lang: 'he', limit: '5' }).toString();
+  // Public Photon instances may not have Hebrew enabled as a result language; use the
+  // Accept-Language header instead of a lang=he query parameter that can return HTTP 400.
+  url.search = new URLSearchParams({ q: query, limit: '5' }).toString();
   try {
     const response = await fetch(url, {
       headers: { 'User-Agent': 'minyan-ivr/1.1', Accept: 'application/geo+json, application/json' },
