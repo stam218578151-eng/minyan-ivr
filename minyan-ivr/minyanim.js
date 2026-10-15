@@ -57,14 +57,20 @@ function nowIsrael() {
 }
 
 function normalize(row) {
-  const t = hhmm(pick(row, ['Time', 'MinyanTime', 'StartTime', 'Hour', 'Zman', 'שעה', 'זמן']));
-  const typeRaw = pick(row, ['Tfila', 'TfilaName', 'Prayer', 'PrayerName', 'MinyanType', 'Type', 'Kind', 'תפילה', 'סוג']);
+  // Nedarim Plus currently returns compact keys: T=prayer, L=location/name,
+  // H=hour, D=distance, A=street address, W=coordinates.
+  const t = hhmm(pick(row, ['H', 'Time', 'MinyanTime', 'StartTime', 'Hour', 'Zman', 'שעה', 'זמן']));
+  const typeRaw = pick(row, ['T', 'Tfila', 'TfilaName', 'Prayer', 'PrayerName', 'MinyanType', 'Type', 'Kind', 'תפילה', 'סוג']);
   return {
     type: typeof typeRaw === 'string' && /[\u0590-\u05ff]/.test(typeRaw) ? typeRaw.trim() : '',
     time: t ? `${String(t.h).padStart(2, '0')}:${String(t.m).padStart(2, '0')}` : '',
     mins: t ? t.h * 60 + t.m : null,
-    place: String(pick(row, ['SynagogueName', 'Synagogue', 'BeitKnesset', 'PlaceName', 'Place', 'Name', 'Title', 'Shul', 'בית כנסת', 'שם']) ?? '').trim(),
-    distance: Number(pick(row, ['Distance', 'Dist', 'Meters', 'מרחק'])) || 0
+    place: String(pick(row, ['L', 'SynagogueName', 'Synagogue', 'BeitKnesset', 'PlaceName', 'Place', 'Name', 'Title', 'Shul', 'A', 'בית כנסת', 'שם']) ?? '').trim(),
+    distance: (() => {
+      const value = pick(row, ['D', 'Distance', 'Dist', 'Meters', 'מרחק']);
+      const match = String(value ?? '').match(/[0-9]+(?:[.,][0-9]+)?/);
+      return match ? Number(match[0].replace(',', '.')) : 0;
+    })()
   };
 }
 
