@@ -1,5 +1,19 @@
 import { geocode } from './geocode.js';
-import { fetchMinyanim } from './minyanim.js';
+import { fetchMinyanim, fetchRaw } from './minyanim.js';
+
+function inspectArrays(value, depth = 0) {
+  if (Array.isArray(value)) {
+    if (!value.length || typeof value[0] === 'object') return value;
+    return null;
+  }
+  if (value && typeof value === 'object' && depth < 5) {
+    for (const child of Object.values(value)) {
+      const found = inspectArrays(child, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
 const cases = [
   { id: 'bnei-brak-street', address: 'בני ברק רבי עקיבא' },
@@ -24,6 +38,22 @@ for (const sample of cases) {
 }
 
 if (firstPoint) {
+  try {
+    const raw = await fetchRaw(firstPoint.lat, firstPoint.lng, 2);
+    let json = null;
+    try { json = JSON.parse(raw); } catch {}
+    const rows = inspectArrays(json);
+    console.log('CALLER_SMOKE_RAW_MINYANIM=' + JSON.stringify({
+      validJson: Boolean(json),
+      rootType: Array.isArray(json) ? 'array' : typeof json,
+      rootKeys: json && !Array.isArray(json) && typeof json === 'object' ? Object.keys(json).slice(0, 12) : [],
+      discoveredArrayCount: Array.isArray(rows) ? rows.length : null,
+      firstRowKeys: rows?.[0] && typeof rows[0] === 'object' ? Object.keys(rows[0]).slice(0, 25) : [],
+      rawPreview: raw.slice(0, 350)
+    }));
+  } catch (error) {
+    console.log('CALLER_SMOKE_RAW_MINYANIM=' + JSON.stringify({ ok: false, error: String(error).slice(0, 160) }));
+  }
   try {
     const minyanim = await fetchMinyanim(firstPoint.lat, firstPoint.lng, 2);
     console.log('CALLER_SMOKE_MINYANIM=' + JSON.stringify({
