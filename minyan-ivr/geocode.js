@@ -62,7 +62,12 @@ async function serializedNominatimFetch(url) {
       },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
-    if (!response.ok) throw new Error('Nominatim HTTP ' + response.status);
+    if (!response.ok) {
+      const error = new Error('Nominatim HTTP ' + response.status);
+      error.status = response.status;
+      error.retryAfter = response.headers.get('retry-after');
+      throw error;
+    }
     return response.json();
   };
   const result = nominatimQueue.then(run, run);
@@ -84,8 +89,14 @@ async function searchNominatim(query) {
     const rows = await serializedNominatimFetch(url);
     return { ok: true, point: (Array.isArray(rows) ? rows : []).map(pointFromNominatim).find(Boolean) ?? null };
   } catch (error) {
-    console.warn('geocode provider unavailable', { provider: 'nominatim', error: String(error).slice(0, 100) });
-    return { ok: false, point: null };
+    const rateLimited = error?.status === 429;
+    console.warn('geocode provider unavailable', {
+      provider: 'nominatim',
+      status: error?.status ?? null,
+      rateLimited,
+      error: String(error).slice(0, 100)
+    });
+    return { ok: false, point: null, rateLimited, retryAfter: error?.retryAfter ?? null };
   }
 }
 
@@ -148,10 +159,16 @@ export async function geocode(text) {
     return photon.point;
   }
 
-  // Try city/street boundaries; calls are queued to respect Nominatim's public rate limit.
+  // If Nominatim is rate-limited or unavailable, do not hammer it with alternate queries.
+  // A provider failure is not evidence that the caller's address does not exist.
+  if (!first.ok) throw new Error('Geocoding providers unavailable');
+
+  // Try city/street boundaries only after a real (HTTP 200) no-match response.
+  // Any rate limit/transport failure stops the attempt instead of misreporting "not found".
   for (let i = 1; i < candidates.length; i++) {
     const attempt = await searchNominatim(candidates[i]);
-    if (attempt.ok) providersResponded++;
+    if (!attempt.ok) throw new Error('Geocoding providers unavailable');
+    providersResponded++;
     if (attempt.point) {
       console.log('geocode matched', { provider: 'nominatim', candidate: i + 1 });
       return attempt.point;
