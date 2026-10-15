@@ -125,7 +125,12 @@ async function download(path) {
   return Buffer.from(await r.arrayBuffer());
 }
 
-app.get('/', (_, res) => res.send('ok'));
+// Accept the IVR flow both on the documented /ivr path and on the service root.
+// Render health probes use HEAD /; keep those probes lightweight and unchanged.
+app.get('/', (req, res) => {
+  if (req.method === 'HEAD') return res.status(200).type('text/plain').send('ok');
+  return ivrHandler(req, res);
+});
 
 // בדיקה: מה נדרים פלוס מחזירים בפועל. פועל רק אם הוגדר DEBUG_KEY.
 // /debug?key=...&lat=32.08&lng=34.78&radius=1
