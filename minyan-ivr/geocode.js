@@ -10,7 +10,7 @@ let nominatimQueue = Promise.resolve();
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function normalizeAddress(value) {
+export function normalizeAddress(value) {
   return String(value ?? '')
     .normalize('NFC')
     .replace(/[\u200e\u200f\u202a-\u202e]/g, '')
