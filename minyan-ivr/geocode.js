@@ -16,9 +16,11 @@ function normalizeAddress(value) {
     .replace(/[\u200e\u200f\u202a-\u202e]/g, '')
     .replace(/[#*]+$/g, ' ')
     .replace(/[!?;:"'״׳]/g, ' ')
-    .replace(/[،]/g, ',')
+    .replace(/[،,]/g, ' ')
     .replace(/\s+/g, ' ')
-    .replace(/^\s*(?:הכתובת היא|אני נמצא ב|אני גר ב|בכתובת)\s+/g, '')
+    // Remove common spoken framing and the caller's spoken end marker, not street/city names.
+    .replace(/^\s*(?:הכתובת היא|הכתובת|בכתובת|המיקום שלי|אני נמצא|אני נמצאת|אני גר|אני גרה|המקום הוא|העיר היא)\s+(?:בעיר\s+)?/g, '')
+    .replace(/\s+(?:סיימתי בסולמית|סיימו בסולמית|ואסיים בסולמית|בסולמית|עם סולמית|סולמית|כוכבית|סיימתי|סיימו|זה הכל|זהו|תודה)\s*$/g, '')
     .trim();
 }
 
