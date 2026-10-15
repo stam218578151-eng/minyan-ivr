@@ -2,14 +2,17 @@ const token = process.env.YM_TOKEN;
 if (!token) throw new Error('YM_TOKEN is not configured; refusing to change Yemot');
 
 const base = 'https://www.call2all.co.il/ym/api/';
-async function api(command, fields, method = 'POST') {
+async function api(command, fields, method = 'GET') {
+  const params = new URLSearchParams({ token, ...fields });
   const url = new URL(command, base);
-  const body = new URLSearchParams({ token, ...fields });
-  const response = await fetch(url, {
-    method,
-    headers: { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-    body
-  });
+  const options = { method, signal: AbortSignal.timeout(15000) };
+  if (method === 'GET') {
+    url.search = params.toString();
+  } else {
+    options.headers = { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' };
+    options.body = params;
+  }
+  const response = await fetch(url, options);
   const raw = await response.text();
   let data;
   try { data = JSON.parse(raw); } catch { throw new Error(command + ' returned non-JSON HTTP ' + response.status); }
@@ -25,6 +28,7 @@ async function api(command, fields, method = 'POST') {
 }
 
 const path = 'ivr2:/ext.ini';
+console.log('ROOT_MENU_UPDATE_BEGIN');
 const current = await api('GetTextFile', { what: path });
 console.log('ROOT_MENU_BEFORE=' + JSON.stringify({
   exists: current.file?.exists,
@@ -38,8 +42,8 @@ const desired = [
   'menu_voice=שלום, ברוכים הבאים לקו מניין הקרוב אליכם. לחיפוש הקישו 1, לחיפושים שמורים 2'
 ].join('\r\n') + '\r\n';
 
-if ((current.contents ?? '') !== desired) {
-  const written = await api('UploadTextFile', { what: path, contents: desired });
+if ((current.contents ?? '').replace(/\r\n/g, '\n').trim() !== desired.replace(/\r\n/g, '\n').trim()) {
+  const written = await api('UploadTextFile', { what: path, contents: desired }, 'POST');
   console.log('ROOT_MENU_WRITE_STATUS=' + written.responseStatus);
 } else {
   console.log('ROOT_MENU_ALREADY_CORRECT=true');
