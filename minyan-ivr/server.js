@@ -29,14 +29,13 @@ const MAX_RESULTS = Number(process.env.MAX_RESULTS || 6);
 // ימות: תווים שמפריעים לפרסור הפקודה
 const clean = s => String(s ?? '').replace(/[&=,.\-]/g, ' ').replace(/\s+/g, ' ').trim();
 const say = t => {
-  // Yemot's API parser expects ampersand-delimited fields; terminate the
-  // response with '&' as well, including the final hangup command.
+  // Use ampersands only between commands; do not leave an empty trailing field.
   const message = clean(t).slice(0, 850);
-  const response = `id_list_message=t-${message}&go_to_folder=hangup&`;
+  const response = `id_list_message=t-${message}&go_to_folder=hangup`;
   console.log('ivr response prepared', {
     command: 'id_list_message',
     characters: response.length,
-    hasHangup: response.includes('&go_to_folder=hangup&')
+    hasHangup: response.includes('&go_to_folder=hangup')
   });
   return response;
 };
@@ -94,12 +93,12 @@ function addressLookupFor(transcript) {
 }
 
 const ask = (prompt, varName, file) =>
-  `read=t-${clean(prompt)}=${varName},,record,/1,${safeFilePart(file)},no,yes,no,1,20&`;
+  `read=t-${clean(prompt)}=${varName},,record,/1,${safeFilePart(file)},no,yes,no,1,20`;
 
 // Yemot's documented read schema: variable,yes,maxDigits,minDigits,timeout,Digits,yes&.
 // The explicit timeout field is required before Digits; only one digit is accepted.
 const askKey = (prompt, varName) =>
-  `read=t-${clean(prompt)}=${varName},yes,1,1,20,Digits,yes&`;
+  `read=t-${clean(prompt)}=${varName},yes,1,1,20,Digits,yes`;
 
 // ערך ההקלטה מימות עשוי להגיע כנתיב מלא או כשם קובץ בלבד.
 // בהקלטה שמורה לשלוחה /1, נתיב יחסי מפורש מתפרש ביחס לשלוחה זו.
