@@ -19,6 +19,10 @@ const safeFilePart = value => String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '')
 const ask = (prompt, varName, file) =>
   `read=t-${clean(prompt)}=${varName},,record,/1,${safeFilePart(file)},no,yes,no,1,20`;
 
+// בקשת הקשה: 1 לאישור, 2 להקלטה מחדש. מגבילים לספרה אחת ומאפשרים רק 1 או 2.
+const askKey = (prompt, varName) =>
+  `read=t-${clean(prompt)}=${varName},no,1,1,7,No,yes,yes,,1.2`;
+
 // ערך ההקלטה מימות עשוי להגיע כנתיב מלא או כשם קובץ בלבד.
 // בהקלטה שמורה לשלוחה /1, נתיב יחסי מפורש מתפרש ביחס לשלוחה זו.
 function recordingPath(value) {
@@ -59,40 +63,104 @@ app.get('/debug', async (req, res) => {
 
 const ivrHandler = async (req, res) => {
   res.type('text/plain; charset=utf-8');
-  // Accept both GET query parameters and form/JSON POST bodies; never log raw credentials.
+  // Yemot repeats all previously collected values in each read callback.
   const params = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
   const getParam = name => params[name] ?? params[Object.keys(params).find(k => k.toLowerCase() === name.toLowerCase())];
+  const hasParam = name => Object.keys(params).some(k => k.toLowerCase() === name.toLowerCase());
   const id = getParam('ApiCallId') ?? Date.now();
-  const voiceFile = getParam('voiceFile');
-  console.log('ivr request received', { method: req.method, hasCallId: Boolean(getParam('ApiCallId')), hasVoiceFile: Boolean(voiceFile) });
 
-  if (!voiceFile) {
-    return res.send(ask('אמרו את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית', 'voiceFile', `addr_${id}`));
+  // Keep each new recording under a fresh parameter name; Yemot appends older
+  // values to later callbacks, so reusing voiceFile would cause duplicate keys.
+  const recordings = Object.entries(params)
+    .filter(([name, value]) => /^voiceFile\d*$/i.test(name) && value != null && String(value).trim() !== '')
+    .map(([name, value]) => {
+      const suffix = name.match(/^voiceFile(\d*)$/i)?.[1] ?? '';
+      const attempt = suffix ? Number(suffix) : 1;
+      const values = Array.isArray(value) ? value : [value];
+      return { attempt, value: values[values.length - 1], name };
+    })
+    .sort((a, b) => a.attempt - b.attempt);
+  const latest = recordings[recordings.length - 1];
+
+  console.log('ivr request received', {
+    method: req.method,
+    hasCallId: Boolean(getParam('ApiCallId')),
+    recordingAttempt: latest?.attempt ?? 0,
+    hasConfirmation: latest ? hasParam('confirmAddress' + latest.attempt) : false
+  });
+
+  if (!latest) {
+    return res.send(ask(
+      'אמרו את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית',
+      'voiceFile',
+      'addr_' + id + '_1'
+    ));
+  }
+
+  const attempt = latest.attempt;
+  const nextVoiceParam = 'voiceFile' + (attempt + 1);
+  const nextRecordingName = 'addr_' + id + '_' + (attempt + 1);
+  const confirmParam = 'confirmAddress' + attempt;
+  const hasConfirmation = hasParam(confirmParam);
+  const confirmation = String(getParam(confirmParam) ?? '').trim();
+
+  // Any answer other than 1 means the caller wants to record the address again.
+  // A fresh variable name avoids conflicts with parameters retained by Yemot.
+  if (hasConfirmation && confirmation !== '1') {
+    return res.send(ask(
+      'בסדר, נקליט שוב. אמרו את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית',
+      nextVoiceParam,
+      nextRecordingName
+    ));
   }
 
   try {
-    const filePath = recordingPath(voiceFile);
+    const filePath = recordingPath(latest.value);
     const audio = await download(filePath);
-    const text = await transcribe(audio);
+    const transcript = await transcribe(audio);
     console.log('speech transcription completed', {
-      hasText: Boolean(text),
-      characterCount: text.length,
-      wordCount: text ? text.split(/\\s+/).filter(Boolean).length : 0
+      hasText: Boolean(transcript),
+      characterCount: transcript.length,
+      wordCount: transcript ? transcript.split(/\s+/).filter(Boolean).length : 0
     });
-    if (!text) return res.send(say('לא הצלחנו להבין את ההקלטה. אמרו שוב את שם העיר ואחריו שם הרחוב, וסיימו בסולמית'));
 
-    const pos = await geocode(text);
+    if (!transcript) {
+      return res.send(ask(
+        'לא הצלחתי להבין את ההקלטה. הקליטו שוב את שם העיר ואחריו שם הרחוב, וסיימו בסולמית',
+        nextVoiceParam,
+        nextRecordingName
+      ));
+    }
+
+    // On the first pass, read back the transcription and wait for an explicit
+    // keypad confirmation. When the caller presses 1, transcribe the same
+    // stored audio again, then proceed with address lookup.
+    if (!hasConfirmation) {
+      const heard = clean(transcript).slice(0, 180);
+      return res.send(askKey(
+        'שמעתי ' + heard + '. אם הכתובת נכונה הקישו 1. להקלטה מחדש הקישו 2',
+        confirmParam
+      ));
+    }
+
+    const pos = await geocode(transcript);
     if (!pos) {
-      return res.send(say('לא הצלחנו לזהות את העיר והרחוב. אמרו שוב את שם העיר ואחריו שם הרחוב, לדוגמה בני ברק רבי עקיבא, וסיימו בסולמית'));
+      return res.send(ask(
+        'לא הצלחתי לאתר את הכתובת שאישרתם. אנא הקליטו שוב את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית',
+        nextVoiceParam,
+        nextRecordingName
+      ));
     }
 
     const list = await fetchMinyanim(pos.lat, pos.lng, RADIUS_KM);
-    if (!list.length) return res.send(say('לא נמצאו מניינים באזור'));
+    if (!list.length) {
+      return res.send(say('לא נמצאו מניינים באזור הכתובת שאישרתם ' + transcript));
+    }
 
     const body = list.slice(0, MAX_RESULTS)
-      .map(m => `${m.type || 'מניין'} בשעה ${m.time || 'לא ידועה'}${m.place ? ' ב' + m.place : ''}`)
+      .map(m => (m.type || 'מניין') + ' בשעה ' + (m.time || 'לא ידועה') + (m.place ? ' ב' + m.place : ''))
       .join('. ');
-    res.send(say(`נמצאו ${list.length} מניינים. ${body}`));
+    res.send(say('נמצאו ' + list.length + ' מניינים. ' + body));
   } catch (e) {
     console.error(e);
     if (String(e?.message ?? e).includes('Geocoding providers unavailable')) {
