@@ -18,7 +18,9 @@ function inspectArrays(value, depth = 0) {
 const cases = [
   { id: 'bnei-brak-street', address: 'בני ברק רבי עקיבא' },
   { id: 'jerusalem-street', address: 'ירושלים בר אילן' },
-  { id: 'haifa-street', address: 'חיפה הרצל' }
+  { id: 'haifa-street', address: 'חיפה הרצל' },
+  { id: 'bnei-brak-street-prefix', address: 'בני ברק רחוב רבי עקיבא' },
+  { id: 'bnei-brak-spoken-framing', address: 'אני נמצא בעיר בני ברק ברחוב רבי עקיבא סיימתי בסולמית' }
 ];
 
 let firstPoint = null;
