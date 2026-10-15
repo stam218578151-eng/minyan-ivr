@@ -29,13 +29,16 @@ const MAX_RESULTS = Number(process.env.MAX_RESULTS || 6);
 // ימות: תווים שמפריעים לפרסור הפקודה
 const clean = s => String(s ?? '').replace(/[&=,.\-]/g, ' ').replace(/\s+/g, ' ').trim();
 const say = t => {
-  // Use ampersands only between commands; do not leave an empty trailing field.
+  // Return one documented playback command only. Keeping the final '&' is
+  // compatible with Yemot's API response parser and avoids chaining a route
+  // action that was followed by repeated identical callbacks in production.
   const message = clean(t).slice(0, 850);
-  const response = `id_list_message=t-${message}&go_to_folder=hangup`;
+  const response = `id_list_message=t-${message}&`;
   console.log('ivr response prepared', {
     command: 'id_list_message',
     characters: response.length,
-    hasHangup: response.includes('&go_to_folder=hangup')
+    terminated: response.endsWith('&'),
+    chainedActions: false
   });
   return response;
 };
