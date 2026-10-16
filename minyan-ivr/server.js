@@ -148,20 +148,34 @@ app.use((req, res, next) => {
   next();
 });
 const RADIUS_KM = Number(process.env.RADIUS_KM || 2);
-const MAX_RESULTS = Number(process.env.MAX_RESULTS || 6);
+const MAX_RESULTS = Number(process.env.MAX_RESULTS || 3);
 
 // ימות: תווים שמפריעים לפרסור הפקודה
 const clean = s => String(s ?? '').replace(/[&=,.\-]/g, ' ').replace(/\s+/g, ' ').trim();
+const cleanSpeechText = value => String(value ?? '')
+  .normalize('NFKC')
+  // Yemot's Text (t-) syntax uses dot and hyphen as control separators.
+  // Allow only letters, numbers, combining marks, spaces and the colon in HH:MM.
+  .replace(/[^\\p{L}\\p{N}\\p{M}\\s:]/gu, ' ')
+  .replace(/\\s+/g, ' ')
+  .trim();
+
 const say = t => {
-  // Return one documented playback command only. Keeping the final '&' is
-  // compatible with Yemot's API response parser and avoids chaining a route
-  // action that was followed by repeated identical callbacks in production.
-  const message = clean(t).slice(0, 850);
-  const response = `id_list_message=t-${message}&`;
+  // Keep the API reply to one plain-text command, using conservative, parser-safe
+  // speech text and a short utterance so a long place name cannot invalidate it.
+  const cleaned = cleanSpeechText(t);
+  const maxSpeechCharacters = 200;
+  const clipped = cleaned.length <= maxSpeechCharacters
+    ? cleaned
+    : cleaned.slice(0, maxSpeechCharacters).replace(/\\s+\\S*$/, '').trim();
+  const response = `id_list_message=t-${clipped}&`;
   console.log('ivr response prepared', {
     command: 'id_list_message',
     characters: response.length,
+    speechCharacters: clipped.length,
+    bytes: Buffer.byteLength(response, 'utf8'),
     terminated: response.endsWith('&'),
+    forbiddenTtsDelimiters: /[.\\-&=,]/.test(clipped),
     chainedActions: false
   });
   return response;
