@@ -642,49 +642,196 @@ const ivrHandler = async (req, res) => {
 app.get('/ivr', ivrHandler);
 app.post('/ivr', ivrHandler);
 
-// שלוחה 2: שני אזורים שמורים המוגדרים בהגדרות Render.
-// משתני ההגדרה: SAVED_AREA_1_NAME / SAVED_AREA_1_ADDRESS,
-//               SAVED_AREA_2_NAME / SAVED_AREA_2_ADDRESS.
-function getSavedAreas() {
-  return [
-    { slot: '1', name: String(process.env.SAVED_AREA_1_NAME || '').trim(), address: String(process.env.SAVED_AREA_1_ADDRESS || '').trim() },
-    { slot: '2', name: String(process.env.SAVED_AREA_2_NAME || '').trim(), address: String(process.env.SAVED_AREA_2_ADDRESS || '').trim() }
-  ];
+// שלוחה 2: חיפוש וניהול של עד שני אזורים שמורים לכל מתקשר.
+function normalizeCallerPhone(value) {
+  let phone = String(value ?? '').trim();
+  if (!phone || /private|anonymous|unknown|חסוי/i.test(phone)) return '';
+  phone = phone.replace(/[^\d+]/g, '');
+  if (phone.startsWith('00')) phone = '+' + phone.slice(2);
+  if (phone.startsWith('0') && !phone.startsWith('00')) phone = '+972' + phone.slice(1);
+  phone = phone.replace(/^\+/, '');
+  return /^\d{8,15}$/.test(phone) ? phone : '';
+}
+
+function callerParameter(params) {
+  const keys = Object.keys(params);
+  // ApiPhone is the documented Yemot caller-number field; accept common aliases too.
+  const preferred = ['ApiPhone', 'callerIdNum', 'ApiCallerId', 'callerPhone', 'CallerPhone', 'phone'];
+  for (const name of preferred) {
+    const key = keys.find(k => k.toLowerCase() === name.toLowerCase());
+    if (key) {
+      const value = params[key];
+      const list = Array.isArray(value) ? value : [value];
+      const normalized = normalizeCallerPhone(list[list.length - 1]);
+      if (normalized) return normalized;
+    }
+  }
+  return '';
+}
+
+async function savedAreasRpc(action, callerKey, slot = null, areaName = null, areaAddress = null) {
+  const endpoint = process.env.SAVED_AREAS_API_URL;
+  const apiKey = process.env.SAVED_AREAS_API_KEY;
+  const secret = process.env.SAVED_AREAS_API_SECRET;
+  if (!endpoint || !apiKey || !secret) throw new Error('Saved areas database is not configured');
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      apikey: apiKey,
+      Authorization: 'Bearer ' + apiKey,
+      'Content-Type': 'application/json',
+      'x-ivr-secret': secret
+    },
+    body: JSON.stringify({
+      p_action: action,
+      p_caller_key: callerKey,
+      p_slot: slot,
+      p_area_name: areaName,
+      p_area_address: areaAddress
+    }),
+    signal: AbortSignal.timeout(8000)
+  });
+  if (!response.ok) {
+    const body = (await response.text()).slice(0, 300);
+    throw new Error('Saved areas database HTTP ' + response.status + ': ' + body);
+  }
+  return response.json();
+}
+
+function callerKeyForPhone(phone) {
+  // The database stores a deterministic digest rather than the phone number itself.
+  return createHash('sha256').update('minyan-ivr-saved-area-v1:' + phone).digest('hex');
 }
 
 const savedHandler = async (req, res) => {
   res.set('Content-Type', 'text/plain; charset=utf-8');
   const params = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
   const getParam = name => params[name] ?? params[Object.keys(params).find(k => k.toLowerCase() === name.toLowerCase())];
-  const areas = getSavedAreas();
-  const choice = String(getParam('savedAreaChoice') ?? '').trim();
-  const area = areas.find(item => item.slot === choice);
-
-  if (!choice) {
-    const configured = areas.filter(item => item.name && item.address);
-    if (!configured.length) {
-      return res.send(say('שלוחה 2 מוכנה לשני אזורים שמורים, אך הם עדיין לא הוגדרו. יש להגדיר את שמות האזורים והכתובות בהגדרות השירות'));
-    }
-    const prompt = configured.map(item => 'לאזור ' + item.name + ' הקישו ' + item.slot).join('. ');
-    return res.send(askKey(prompt, 'savedAreaChoice'));
+  const hasParam = name => Object.keys(params).some(k => k.toLowerCase() === name.toLowerCase());
+  const rawPhone = callerParameter(params);
+  if (!rawPhone) {
+    emit(req, 'saved_area.caller_phone_missing', {
+      keysPresent: Object.keys(params).filter(k => /phone|caller|api/i.test(k)),
+      apiPhoneFieldPresent: hasParam('ApiPhone')
+    });
+    return res.send(say('לא זיהיתי את מספר הטלפון שממנו התקשרתם. יש להגדיר בשלוחת ימות המשיח העברת מספר מתקשר בפרמטר ApiPhone'));
+  }
+  const callerKey = callerKeyForPhone(rawPhone);
+  let areas;
+  try {
+    areas = await savedAreasRpc('list', callerKey);
+    if (!Array.isArray(areas)) areas = [];
+  } catch (error) {
+    emit(req, 'saved_area.database_read_failed', { error: errorInfo(error) });
+    return res.send(say('שירות האזורים השמורים אינו זמין כרגע. נסו שוב מאוחר יותר'));
   }
 
+  const choice = String(getParam('savedAreaChoice') ?? '').trim();
+  const slotToConfigure = choice === '3' ? 1 : choice === '4' ? 2 : null;
+
+  // Configure or replace a saved slot by recording its city and street over the phone.
+  if (slotToConfigure) {
+    const recordings = Object.entries(params)
+      .filter(([name, value]) => /^savedVoiceFile\d*$/i.test(name) && value != null && String(value).trim() !== '')
+      .map(([name, value]) => {
+        const suffix = name.match(/^savedVoiceFile(\d*)$/i)?.[1] ?? '';
+        const attempt = suffix ? Number(suffix) : 1;
+        const values = Array.isArray(value) ? value : [value];
+        return { attempt, value: values[values.length - 1], name };
+      })
+      .sort((a, b) => a.attempt - b.attempt);
+    const latest = recordings[recordings.length - 1];
+
+    if (!latest) {
+      return res.send(ask(
+        'הקליטו את שם העיר ואחריו את שם הרחוב לשמירה באזור ' + slotToConfigure + ', וסיימו בסולמית',
+        'savedVoiceFile',
+        'saved_area_' + slotToConfigure + '_' + (getParam('ApiCallId') ?? Date.now()) + '_1'
+      ));
+    }
+
+    const confirmationName = 'savedConfirmAddress' + latest.attempt;
+    const hasConfirmation = hasParam(confirmationName);
+    const confirmation = String(getParam(confirmationName) ?? '').trim();
+    const nextParam = 'savedVoiceFile' + (latest.attempt + 1);
+    const nextFile = 'saved_area_' + slotToConfigure + '_' + (getParam('ApiCallId') ?? Date.now()) + '_' + (latest.attempt + 1);
+
+    try {
+      const filePath = recordingPath(latest.value);
+      const transcript = await transcriptFor(
+        'saved-area:' + String(getParam('ApiCallId') ?? 'call') + ':' + slotToConfigure + ':' + latest.attempt + ':' + String(latest.value),
+        filePath,
+        req
+      );
+      if (!transcript) {
+        return res.send(ask(
+          'לא הצלחתי להבין את הכתובת. הקליטו שוב את שם העיר והרחוב, וסיימו בסולמית',
+          nextParam,
+          nextFile
+        ));
+      }
+
+      if (!hasConfirmation) {
+        void addressLookupFor(transcript, req);
+        return res.send(askKey(
+          'שמעתי ' + clean(transcript).slice(0, 150) + '. אם הכתובת נכונה הקישו 1. להקלטה מחדש הקישו 2',
+          confirmationName
+        ));
+      }
+
+      if (confirmation !== '1') {
+        return res.send(ask(
+          'נקליט מחדש. אמרו את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית',
+          nextParam,
+          nextFile
+        ));
+      }
+
+      const lookup = await addressLookupFor(transcript, req);
+      if (lookup.error) throw new Error(lookup.error);
+      if (!lookup.pos) {
+        return res.send(ask(
+          'לא הצלחתי לאתר את הכתובת. הקליטו שוב את שם העיר ואחריו את שם הרחוב',
+          nextParam,
+          nextFile
+        ));
+      }
+
+      await savedAreasRpc('upsert', callerKey, slotToConfigure, transcript, transcript);
+      emit(req, 'saved_area.saved', { slot: slotToConfigure, callerKeyHash: callerKey.slice(0, 12) });
+      return res.send(say('האזור ' + slotToConfigure + ' נשמר בהצלחה. בשיחה הבאה תוכלו לבחור אותו משלוחה 2'));
+    } catch (error) {
+      emit(req, 'saved_area.configure_failed', { slot: slotToConfigure, error: errorInfo(error) });
+      return res.send(say('לא הצלחתי לשמור את האזור כרגע. נסו שוב מאוחר יותר'));
+    }
+  }
+
+  // Initial menu: configured slots are searchable; slots can always be replaced.
+  if (choice !== '1' && choice !== '2') {
+    const configuredSlots = new Set(areas.map(area => Number(area.slot)));
+    const options = [];
+    if (configuredSlots.has(1)) options.push('לחיפוש באזור ' + (areas.find(a => Number(a.slot) === 1)?.name || 'הראשון') + ' הקישו 1');
+    if (configuredSlots.has(2)) options.push('לחיפוש באזור ' + (areas.find(a => Number(a.slot) === 2)?.name || 'השני') + ' הקישו 2');
+    options.push('להגדרת אזור ראשון או להחלפתו הקישו 3');
+    options.push('להגדרת אזור שני או להחלפתו הקישו 4');
+    return res.send(askKey(options.join('. '), 'savedAreaChoice'));
+  }
+
+  const area = areas.find(item => String(item.slot) === choice);
   if (!area || !area.name || !area.address) {
-    return res.send(say('האיזור שבחרתם עדיין לא הוגדר. יש להגדיר את שם האיזור והכתובת שלו בהגדרות השירות'));
+    return res.send(say('האזור שבחרתם עדיין לא הוגדר. הקישו 3 להגדרת אזור ראשון או 4 להגדרת אזור שני'));
   }
 
   try {
-    emit(req, 'saved_area.selected', { slot: area.slot, configured: true });
-    let pos;
+    emit(req, 'saved_area.selected', { slot: choice, configured: true, callerKeyHash: callerKey.slice(0, 12) });
     const lookup = await addressLookupFor(area.address, req);
     if (lookup.error) throw new Error(lookup.error);
-    pos = lookup.pos;
-    if (!pos) {
-      return res.send(say('לא הצלחתי לאתר את האיזור השמור ' + area.name + '. יש לבדוק את הכתובת בהגדרות השירות'));
-    }
+    const pos = lookup.pos;
+    if (!pos) return res.send(say('לא הצלחתי לאתר את הכתובת השמורה של אזור ' + choice + '. הגדירו אותו מחדש'));
 
     const list = await fetchMinyanim(pos.lat, pos.lng, RADIUS_KM);
-    if (!list.length) return res.send(say('לא נמצאו מניינים באזור ' + area.name));
+    if (!list.length) return res.send(say('לא נמצאו מניינים באזור השמור ' + area.name));
 
     const sortMode = String(getParam('savedSortMode') ?? '').trim();
     if (sortMode !== '1' && sortMode !== '2') {
@@ -722,7 +869,7 @@ const savedHandler = async (req, res) => {
     }
     return res.send(say('באזור ' + area.name + '. ' + spoken + '. אלה כל המניינים שנמצאו'));
   } catch (error) {
-    emit(req, 'saved_area.failure', { slot: area.slot, error: errorInfo(error) });
+    emit(req, 'saved_area.failure', { slot: choice, error: errorInfo(error) });
     return res.send(say('אירעה שגיאה בחיפוש המניינים באזור השמור. נסו שוב מאוחר יותר'));
   }
 };
