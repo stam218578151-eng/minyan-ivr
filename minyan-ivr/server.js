@@ -301,7 +301,37 @@ const ask = (prompt, varName, file) =>
 // Yemot's documented read schema: variable,yes,maxDigits,minDigits,timeout,Digits,yes&.
 // The explicit timeout field is required before Digits; only one digit is accepted.
 const askKey = (prompt, varName) =>
-  `read=t-${clean(prompt)}=${varName},yes,1,1,20,Digits,yes&`;
+  `read=t-${cleanSpeechText(prompt)}=${varName},yes,1,1,20,Digits,yes&`;
+
+const MINYAN_PAGE_SIZE = 3;
+
+function sortMinyanim(items, mode) {
+  const rows = [...items];
+  if (mode === '2') {
+    rows.sort((a, b) =>
+      (a.place || 'בית כנסת לא ידוע').localeCompare(b.place || 'בית כנסת לא ידוע', 'he') ||
+      (a.mins ?? 9999) - (b.mins ?? 9999)
+    );
+  } else {
+    rows.sort((a, b) =>
+      (a.minutesUntilNext ?? 9999) - (b.minutesUntilNext ?? 9999) ||
+      (a.distance ?? 0) - (b.distance ?? 0)
+    );
+  }
+  return rows;
+}
+
+function describeMinyan(m, index, mode, previousPlace = '') {
+  const place = m.place || 'בית כנסת לא ידוע';
+  const when = m.time
+    ? (m.nextDay ? ' מחר בשעה ' : ' היום בשעה ') + m.time
+    : ' בשעה לא ידועה';
+  if (mode === '2') {
+    const prefix = place === previousPlace ? '' : 'בית הכנסת ' + place + '. ';
+    return prefix + 'מניין ' + (index + 1) + when + (m.type ? ' תפילת ' + m.type : '');
+  }
+  return 'מניין ' + (index + 1) + when + ' בבית הכנסת ' + place + (m.type ? ', תפילת ' + m.type : '');
+}
 
 // ערך ההקלטה מימות עשוי להגיע כנתיב מלא או כשם קובץ בלבד.
 // בהקלטה שמורה לשלוחה /1, נתיב יחסי מפורש מתפרש ביחס לשלוחה זו.
@@ -534,15 +564,63 @@ const ivrHandler = async (req, res) => {
       return res.send(say('לא נמצאו מניינים באזור הכתובת שאישרתם ' + transcript));
     }
 
-    const body = list.slice(0, MAX_RESULTS)
-      .map(m => {
-        const when = m.time
-          ? (m.nextDay ? ' מחר בשעה ' : ' היום בשעה ') + m.time
-          : ' בשעה לא ידועה';
-        return (m.type || 'מניין') + when + (m.place ? ' ב' + m.place : '');
-      })
-      .join('. ');
-    res.send(say('נמצאו ' + list.length + ' מניינים באזור. ' + body));
+    const sortParamNames = Object.keys(params).filter(name => /^sortMode$/i.test(name));
+    const sortMode = sortParamNames.length ? String(getParam('sortMode') ?? '').trim() : '';
+    if (sortMode !== '1' && sortMode !== '2') {
+      req.ivrStage = 'awaiting_minyan_sort_choice';
+      emit(req, 'ivr.decision', {
+        decision: 'ask_minyan_sort_choice',
+        resultsFound: list.length
+      });
+      return res.send(askKey(
+        'נמצאו ' + list.length + ' מניינים באזור. להקראה לפי שעה הקישו 1. להקראה לפי בית כנסת הקישו 2',
+        'sortMode'
+      ));
+    }
+
+    const sorted = sortMinyanim(list, sortMode);
+    const actionNames = Object.keys(params)
+      .filter(name => /^pageAction\\d+$/i.test(name))
+      .sort((a, b) => Number(a.match(/\\d+/)?.[0] || 0) - Number(b.match(/\\d+/)?.[0] || 0));
+    const lastActionName = actionNames[actionNames.length - 1];
+    const lastAction = lastActionName ? String(getParam(lastActionName) ?? '').trim() : '';
+    if (lastAction === '2') {
+      req.ivrStage = 'minyan_list_finished';
+      emit(req, 'ivr.decision', { decision: 'finish_minyan_list', sortMode });
+      return res.send(say('סיימנו את רשימת המניינים. תודה ולהתראות'));
+    }
+
+    const pageIndex = actionNames.filter(name => String(getParam(name) ?? '').trim() === '1').length;
+    const start = pageIndex * MINYAN_PAGE_SIZE;
+    const page = sorted.slice(start, start + MINYAN_PAGE_SIZE);
+    if (!page.length) {
+      req.ivrStage = 'minyan_list_finished';
+      emit(req, 'ivr.decision', { decision: 'minyan_list_exhausted', sortMode, pageIndex });
+      return res.send(say('אין מניינים נוספים ברשימה'));
+    }
+
+    let previousPlace = '';
+    const spoken = page.map((m, offset) => {
+      const text = describeMinyan(m, start + offset, sortMode, previousPlace);
+      previousPlace = m.place || 'בית כנסת לא ידוע';
+      return text;
+    }).join('. ');
+    const hasMore = start + page.length < sorted.length;
+    emit(req, 'ivr.decision', {
+      decision: 'speak_minyan_page',
+      sortMode,
+      pageIndex,
+      pageSize: page.length,
+      totalResults: sorted.length,
+      hasMore
+    });
+    if (hasMore) {
+      return res.send(askKey(
+        spoken + '. להמשך הרשימה הקישו 1. לסיום הקישו 2',
+        'pageAction' + (pageIndex + 1)
+      ));
+    }
+    return res.send(say(spoken + '. אלה כל המניינים שנמצאו'));
   } catch (e) {
     const geocodingUnavailable = String(e?.message ?? e).includes('Geocoding providers unavailable');
     emit(req, 'ivr.failure', {
