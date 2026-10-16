@@ -1,26 +1,150 @@
 import express from 'express';
+import { createHash, randomUUID } from 'node:crypto';
 import { transcribe } from './stt.js';
 import { geocode, normalizeAddress } from './geocode.js';
 import { fetchMinyanim, fetchRaw } from './minyanim.js';
 
 const app = express();
-// Yemot's API module may send either GET (default) or POST (api_url_post=yes).
-app.use(express.urlencoded({ extended: false, limit: '32kb' }));
-app.use(express.json({ limit: '32kb' }));
-// Keep request duration/status telemetry so API timeouts can be distinguished
-// from a response-format problem. Do not log caller audio paths or phone numbers.
+
+function shortHash(value) {
+  return createHash('sha256').update(String(value ?? '')).digest('hex').slice(0, 12);
+}
+
+function emit(req, event, details = {}) {
+  console.log(JSON.stringify({
+    ts: new Date().toISOString(),
+    app: 'minyan-ivr',
+    event,
+    requestId: req?.requestId ?? null,
+    callKey: req?.callKey ?? null,
+    stage: req?.ivrStage ?? null,
+    ...details
+  }));
+}
+
+function errorInfo(error) {
+  const rawMessage = String(error?.message ?? error ?? 'unknown error');
+  const message = rawMessage
+    .replace(/([?&]token=)[^&\s]+/gi, '$1[REDACTED]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/(api[_-]?key|authorization)\s*[:=]\s*[^,\s]+/gi, '$1=[REDACTED]')
+    .slice(0, 700);
+  return {
+    name: String(error?.name ?? 'Error'),
+    message,
+    stack: typeof error?.stack === 'string' ? error.stack.split('\n').slice(0, 8).join('\n') : null
+  };
+}
+
+function summarizeResponse(body) {
+  const text = typeof body === 'string' ? body : Buffer.isBuffer(body) ? body.toString('utf8') : '';
+  const parts = text.split('&');
+  const commands = parts.filter(Boolean).map(part => part.split('=')[0] || '[EMPTY]');
+  let preview = '[non-text response]';
+  const readMatch = text.match(/^read=t-.*?=([a-z0-9_]+)/i);
+  if (readMatch) {
+    preview = 'read=t-[PROMPT_REDACTED]=' + readMatch[1] + text.slice(readMatch[0].length);
+  } else if (/^id_list_message=t-/i.test(text)) {
+    preview = 'id_list_message=t-[SPEECH_TEXT_REDACTED]' + (text.endsWith('&') ? '&' : '');
+  } else if (text.length <= 120) {
+    preview = text;
+  }
+  return {
+    bytes: Buffer.byteLength(text, 'utf8'),
+    commandNames: commands,
+    commandCount: commands.length,
+    startsWithKnownCommand: /^(read|id_list_message)=/i.test(text),
+    endsWithAmpersand: text.endsWith('&'),
+    emptySegments: parts.filter(part => part === '').length,
+    equalsCount: (text.match(/=/g) || []).length,
+    redactedShape: preview,
+    sha256: shortHash(text)
+  };
+}
+
+// Assign IDs before body parsing, so malformed incoming requests are diagnosable.
 app.use((req, res, next) => {
-  const startedAt = Date.now();
+  req.requestId = randomUUID();
+  req.startedAt = Date.now();
+  req.ivrStage = 'http_received';
+  emit(req, 'http.request.received', {
+    method: req.method,
+    path: req.path,
+    contentType: req.get('content-type') ?? null,
+    contentLengthHeader: req.get('content-length') ?? null,
+    queryKeys: Object.keys(req.query ?? {})
+  });
+
+  const originalSend = res.send.bind(res);
+  res.send = body => {
+    if ((req.path === '/ivr' || req.path === '/') && req.method !== 'HEAD') {
+      emit(req, 'ivr.response.about_to_send', {
+        statusCode: res.statusCode,
+        contentType: res.getHeader('content-type') ?? null,
+        response: summarizeResponse(body)
+      });
+    }
+    return originalSend(body);
+  };
+
   res.on('finish', () => {
-    console.log('http response completed', {
+    emit(req, 'http.response.finished', {
       method: req.method,
       path: req.path,
       statusCode: res.statusCode,
-      durationMs: Date.now() - startedAt,
+      durationMs: Date.now() - req.startedAt,
       contentType: res.getHeader('content-type') ?? null,
-      contentLength: res.getHeader('content-length') ?? null
+      contentLength: res.getHeader('content-length') ?? null,
+      headersSent: res.headersSent
     });
   });
+  next();
+});
+
+// Yemot supports GET by default and optionally POST.
+app.use(express.urlencoded({ extended: false, limit: '32kb' }));
+app.use(express.json({ limit: '32kb' }));
+
+// Log parameter inventory without exposing phone numbers, audio paths or address text.
+app.use((req, res, next) => {
+  if (req.path === '/ivr' || req.path === '/') {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const query = req.query && typeof req.query === 'object' ? req.query : {};
+    const params = { ...query, ...body };
+    const callIdKey = Object.keys(params).find(key => key.toLowerCase() === 'apicallid');
+    const callId = callIdKey ? params[callIdKey] : null;
+    if (callId != null && String(callId).trim()) req.callKey = shortHash(callId);
+
+    emit(req, 'http.request.parameters_parsed', {
+      queryKeys: Object.keys(query),
+      bodyKeys: Object.keys(body),
+      allKeys: Object.keys(params),
+      parameterCount: Object.keys(params).length,
+      parameters: Object.entries(params).map(([key, value]) => {
+        const values = Array.isArray(value) ? value : [value];
+        const scalar = values[values.length - 1];
+        const summary = {
+          key,
+          valueType: Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value,
+          itemCount: values.length,
+          valueLength: scalar == null ? 0 : String(scalar).length
+        };
+        if (/^apicallid$/i.test(key)) {
+          summary.valueRedacted = true;
+          summary.valueHash = shortHash(scalar);
+        } else if (/^confirmAddress\d*$/i.test(key)) {
+          summary.confirmationDigit = /^[1-9]$/.test(String(scalar ?? '')) ? String(scalar) : '[not-a-single-digit]';
+        } else if (/^voiceFile\d*$/i.test(key)) {
+          const path = String(scalar ?? '');
+          summary.recordingPathRedacted = true;
+          summary.hasSlash = /[\\/]/.test(path);
+          summary.hasIvr2Prefix = /^ivr2:/i.test(path);
+          summary.extension = path.match(/\.(wav|ogg|mp3)(?:[?#].*)?$/i)?.[1]?.toLowerCase() ?? null;
+        }
+        return summary;
+      })
+    });
+  }
   next();
 });
 const RADIUS_KM = Number(process.env.RADIUS_KM || 2);
@@ -53,14 +177,50 @@ const ADDRESS_CACHE_MS = 5 * 60 * 1000;
 const transcriptCache = new Map();
 const addressLookupCache = new Map();
 
-async function transcriptFor(key, filePath) {
+
+async function transcriptFor(key, filePath, req) {
   const existing = transcriptCache.get(key);
-  if (existing && existing.expiresAt > Date.now()) return existing.promise;
+  if (existing && existing.expiresAt > Date.now()) {
+    emit(req, 'stt.cache.hit', { cache: 'transcript' });
+    return existing.promise;
+  }
+  emit(req, 'stt.cache.miss', { cache: 'transcript' });
   const entry = {
     expiresAt: Date.now() + TRANSCRIPT_CACHE_MS,
     promise: (async () => {
-      const audio = await download(filePath);
-      return String((await transcribe(audio)) ?? '').trim();
+      req.ivrStage = 'recording_download';
+      const downloadStarted = Date.now();
+      emit(req, 'recording.download.started', {
+        fileExtension: String(filePath).match(/\.(wav|ogg|mp3)$/i)?.[1]?.toLowerCase() ?? null,
+        pathRedacted: true
+      });
+      const audio = await download(filePath, req);
+      emit(req, 'recording.download.completed', {
+        durationMs: Date.now() - downloadStarted,
+        bytes: audio.length
+      });
+
+      req.ivrStage = 'speech_transcription';
+      const sttStarted = Date.now();
+      emit(req, 'stt.started', { provider: 'groq_whisper', language: 'he', audioBytes: audio.length });
+      try {
+        const transcript = String((await transcribe(audio)) ?? '').trim();
+        emit(req, 'stt.completed', {
+          provider: 'groq_whisper',
+          durationMs: Date.now() - sttStarted,
+          hasText: Boolean(transcript),
+          characterCount: transcript.length,
+          wordCount: transcript ? transcript.split(/\s+/).filter(Boolean).length : 0
+        });
+        return transcript;
+      } catch (error) {
+        emit(req, 'stt.failed', {
+          provider: 'groq_whisper',
+          durationMs: Date.now() - sttStarted,
+          error: errorInfo(error)
+        });
+        throw error;
+      }
     })()
   };
   transcriptCache.set(key, entry);
@@ -70,27 +230,53 @@ async function transcriptFor(key, filePath) {
   return entry.promise;
 }
 
-function addressLookupFor(transcript) {
-  const key = normalizeAddress(transcript).toLocaleLowerCase('he-IL');
-  if (!key) return Promise.resolve({ pos: null });
+function addressLookupFor(transcript, req) {
+  const normalized = normalizeAddress(transcript);
+  const key = normalized.toLocaleLowerCase('he-IL');
+  if (!key) {
+    emit(req, 'geocode.skipped', { reason: 'empty_normalized_address' });
+    return Promise.resolve({ pos: null });
+  }
   const existing = addressLookupCache.get(key);
-  if (existing && existing.expiresAt > Date.now()) return existing.promise;
+  if (existing && existing.expiresAt > Date.now()) {
+    emit(req, 'geocode.cache.hit', {
+      cache: 'address',
+      normalizedCharacterCount: normalized.length,
+      wordCount: normalized.split(/\s+/).filter(Boolean).length
+    });
+    return existing.promise;
+  }
 
+  emit(req, 'geocode.started', {
+    normalizedCharacterCount: normalized.length,
+    wordCount: normalized.split(/\s+/).filter(Boolean).length
+  });
+  const started = Date.now();
   const entry = {
     expiresAt: Date.now() + ADDRESS_CACHE_MS,
     promise: geocode(transcript).then(
-      pos => ({ pos }),
-      error => ({ error: String(error?.message ?? error) })
+      pos => {
+        emit(req, 'geocode.completed', {
+          durationMs: Date.now() - started,
+          matched: Boolean(pos),
+          approximatePoint: pos ? { lat: Number(pos.lat.toFixed(2)), lng: Number(pos.lng.toFixed(2)) } : null
+        });
+        return { pos };
+      },
+      error => {
+        emit(req, 'geocode.failed', {
+          durationMs: Date.now() - started,
+          error: errorInfo(error)
+        });
+        return { error: String(error?.message ?? error) };
+      }
     )
   };
   addressLookupCache.set(key, entry);
   entry.promise.then(result => {
     if (addressLookupCache.get(key) !== entry) return;
-    if (result.pos) {
-      entry.expiresAt = Date.now() + ADDRESS_CACHE_MS;
-    } else {
-      addressLookupCache.delete(key);
-    }
+    if (result.pos) entry.expiresAt = Date.now() + ADDRESS_CACHE_MS;
+    else addressLookupCache.delete(key);
   });
   return entry.promise;
 }
@@ -119,12 +305,43 @@ function recordingPath(value) {
   return `/${p}`;
 }
 
-async function download(path) {
+
+async function download(path, req) {
+  if (!process.env.YM_TOKEN) {
+    emit(req, 'recording.download.failed', { reason: 'YM_TOKEN_missing' });
+    throw new Error('YM_TOKEN is missing');
+  }
   const url = 'https://www.call2all.co.il/ym/api/DownloadFile?token=' +
     process.env.YM_TOKEN + '&path=' + encodeURIComponent('ivr2:' + path);
-  const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-  if (!r.ok) throw new Error(`download ${r.status}`);
-  return Buffer.from(await r.arrayBuffer());
+  const started = Date.now();
+  let response;
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+  } catch (error) {
+    emit(req, 'recording.download.failed', {
+      durationMs: Date.now() - started,
+      reason: 'network_or_timeout',
+      error: errorInfo(error)
+    });
+    throw error;
+  }
+  if (!response.ok) {
+    emit(req, 'recording.download.failed', {
+      durationMs: Date.now() - started,
+      statusCode: response.status,
+      statusText: response.statusText,
+      reason: 'provider_http_error'
+    });
+    throw new Error(\`download \${response.status}\`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  emit(req, 'recording.download.http_ok', {
+    durationMs: Date.now() - started,
+    statusCode: response.status,
+    contentType: response.headers.get('content-type'),
+    bytes: bytes.length
+  });
+  return bytes;
 }
 
 // Accept the IVR flow both on the documented /ivr path and on the service root.
@@ -148,11 +365,19 @@ app.get('/debug', async (req, res) => {
 
 const ivrHandler = async (req, res) => {
   res.set('Content-Type', 'text/plain; charset=utf-8');
+  req.ivrStage = 'ivr_handler_started';
   // Yemot repeats all previously collected values in each read callback.
   const params = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
   const getParam = name => params[name] ?? params[Object.keys(params).find(k => k.toLowerCase() === name.toLowerCase())];
   const hasParam = name => Object.keys(params).some(k => k.toLowerCase() === name.toLowerCase());
   const id = getParam('ApiCallId') ?? Date.now();
+  if (getParam('ApiCallId') != null) req.callKey = shortHash(getParam('ApiCallId'));
+  emit(req, 'ivr.callback.started', {
+    method: req.method, path: req.path,
+    hasCallId: Boolean(getParam('ApiCallId')),
+    queryKeyCount: Object.keys(req.query ?? {}).length,
+    bodyKeyCount: Object.keys(req.body ?? {}).length
+  });
 
   // Keep each new recording under a fresh parameter name; Yemot appends older
   // values to later callbacks, so reusing voiceFile would cause duplicate keys.
@@ -167,14 +392,19 @@ const ivrHandler = async (req, res) => {
     .sort((a, b) => a.attempt - b.attempt);
   const latest = recordings[recordings.length - 1];
 
-  console.log('ivr request received', {
-    method: req.method,
-    hasCallId: Boolean(getParam('ApiCallId')),
-    recordingAttempt: latest?.attempt ?? 0,
-    hasConfirmation: latest ? hasParam('confirmAddress' + latest.attempt) : false
+  emit(req, 'ivr.callback.classified', {
+    recordingParameterNames: recordings.map(item => item.name),
+    recordingCount: recordings.length,
+    selectedAttempt: latest?.attempt ?? null,
+    selectedParameter: latest?.name ?? null,
+    confirmationParameterExpected: latest ? 'confirmAddress' + latest.attempt : null,
+    hasConfirmation: latest ? hasParam('confirmAddress' + latest.attempt) : false,
+    parameterKeys: Object.keys(params)
   });
 
   if (!latest) {
+    req.ivrStage = 'awaiting_initial_recording';
+    emit(req, 'ivr.decision', { decision: 'ask_for_city_and_street_recording' });
     return res.send(ask(
       'אמרו את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית',
       'voiceFile',
@@ -192,6 +422,12 @@ const ivrHandler = async (req, res) => {
   // Any answer other than 1 means the caller wants to record the address again.
   // A fresh variable name avoids conflicts with parameters retained by Yemot.
   if (hasConfirmation && confirmation !== '1') {
+    req.ivrStage = 'confirmation_declined';
+    emit(req, 'ivr.decision', {
+      decision: 'record_address_again',
+      confirmationValue: /^[1-9]$/.test(confirmation) ? confirmation : '[not-a-single-digit]',
+      nextAttempt: attempt + 1
+    });
     return res.send(ask(
       'בסדר, נקליט שוב. אמרו את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית',
       nextVoiceParam,
@@ -199,19 +435,30 @@ const ivrHandler = async (req, res) => {
     ));
   }
 
+  let activeStage = 'recording_path_validation';
   try {
+    req.ivrStage = activeStage;
     const filePath = recordingPath(latest.value);
+    emit(req, 'recording.path.validated', {
+      attempt, parameterName: latest.name,
+      pathRedacted: true,
+      hasSlash: /[\\/]/.test(String(latest.value)),
+      extension: filePath.match(/\.(wav|ogg|mp3)$/i)?.[1]?.toLowerCase() ?? null
+    });
     // ApiCallId is stable across callbacks within the same call. Include the
     // recording name so a retry cannot reuse another recording's transcript.
     const transcriptKey = String(id) + ':' + attempt + ':' + String(latest.value);
-    const transcript = await transcriptFor(transcriptKey, filePath);
-    console.log('speech transcription completed', {
+    const transcript = await transcriptFor(transcriptKey, filePath, req);
+    emit(req, 'ivr.transcript.ready', {
       hasText: Boolean(transcript),
       characterCount: transcript.length,
-      wordCount: transcript ? transcript.split(/\s+/).filter(Boolean).length : 0
+      wordCount: transcript ? transcript.split(/\s+/).filter(Boolean).length : 0,
+      spokenAddressOmittedFromLogs: true
     });
 
     if (!transcript) {
+      req.ivrStage = 'empty_transcription';
+      emit(req, 'ivr.decision', { decision: 'ask_to_rerecord', reason: 'speech_transcription_empty' });
       return res.send(ask(
         'לא הצלחתי להבין את ההקלטה. הקליטו שוב את שם העיר ואחריו שם הרחוב, וסיימו בסולמית',
         nextVoiceParam,
@@ -223,20 +470,30 @@ const ivrHandler = async (req, res) => {
     // keypad confirmation. When the caller presses 1, transcribe the same
     // stored audio again, then proceed with address lookup.
     if (!hasConfirmation) {
+      req.ivrStage = 'awaiting_address_confirmation';
       const heard = clean(transcript).slice(0, 180);
+      emit(req, 'ivr.decision', {
+        decision: 'read_back_transcription_and_wait_for_keypress',
+        confirmationParameter: confirmParam,
+        transcriptCharacterCount: transcript.length,
+        spokenAddressOmittedFromLogs: true
+      });
       // Start geocoding now without delaying the spoken confirmation prompt.
       // The result is awaited only if the caller confirms the address.
-      void addressLookupFor(transcript);
+      void addressLookupFor(transcript, req);
       return res.send(askKey(
         'שמעתי ' + heard + '. אם הכתובת נכונה הקישו 1. להקלטה מחדש הקישו 2',
         confirmParam
       ));
     }
 
-    const lookup = await addressLookupFor(transcript);
+    req.ivrStage = 'awaiting_geocode_result';
+    const lookup = await addressLookupFor(transcript, req);
     if (lookup.error) throw new Error(lookup.error);
     const pos = lookup.pos;
     if (!pos) {
+      req.ivrStage = 'geocode_no_match';
+      emit(req, 'ivr.decision', { decision: 'ask_to_rerecord', reason: 'geocoder_returned_no_match' });
       return res.send(ask(
         'לא הצלחתי לאתר את הכתובת שאישרתם. אנא הקליטו שוב את שם העיר ואחריו את שם הרחוב, וסיימו בסולמית',
         nextVoiceParam,
@@ -244,8 +501,22 @@ const ivrHandler = async (req, res) => {
       ));
     }
 
+    req.ivrStage = 'minyan_search';
+    const minyanStarted = Date.now();
+    emit(req, 'minyan.search.started', {
+      approximatePoint: { lat: Number(pos.lat.toFixed(2)), lng: Number(pos.lng.toFixed(2)) },
+      radiusKmConfigured: RADIUS_KM,
+      maxResultsToSpeak: MAX_RESULTS
+    });
     const list = await fetchMinyanim(pos.lat, pos.lng, RADIUS_KM);
+    emit(req, 'minyan.search.completed', {
+      durationMs: Date.now() - minyanStarted,
+      returnedRows: list.length,
+      numberOfResultsToSpeak: Math.min(list.length, MAX_RESULTS)
+    });
     if (!list.length) {
+      req.ivrStage = 'minyan_search_empty';
+      emit(req, 'ivr.decision', { decision: 'speak_no_minyanim_found' });
       return res.send(say('לא נמצאו מניינים באזור הכתובת שאישרתם ' + transcript));
     }
 
@@ -259,10 +530,17 @@ const ivrHandler = async (req, res) => {
       .join('. ');
     res.send(say('נמצאו ' + list.length + ' מניינים באזור. ' + body));
   } catch (e) {
-    console.error(e);
-    if (String(e?.message ?? e).includes('Geocoding providers unavailable')) {
+    const geocodingUnavailable = String(e?.message ?? e).includes('Geocoding providers unavailable');
+    emit(req, 'ivr.failure', {
+      stage: req.ivrStage ?? activeStage,
+      category: geocodingUnavailable ? 'geocoding_provider_unavailable' : 'unexpected_flow_error',
+      error: errorInfo(e)
+    });
+    if (geocodingUnavailable) {
+      req.ivrStage = 'speaking_geocoding_provider_error';
       res.send(say('שירות איתור הכתובות אינו זמין כרגע. נסו שוב בעוד דקה'));
     } else {
+      req.ivrStage = 'speaking_generic_error';
       res.send(say('אירעה שגיאה, נסו שוב מאוחר יותר'));
     }
   }
@@ -272,4 +550,33 @@ const ivrHandler = async (req, res) => {
 app.get('/ivr', ivrHandler);
 app.post('/ivr', ivrHandler);
 
-app.listen(process.env.PORT || 3000);
+app.use((error, req, res, next) => {
+  emit(req, 'http.middleware.failure', {
+    stage: req.ivrStage ?? 'before_route_handler',
+    error: errorInfo(error),
+    responseAlreadyStarted: res.headersSent
+  });
+  if (res.headersSent) return next(error);
+  if (req.path === '/ivr' || req.path === '/') {
+    res.status(200).type('text/plain; charset=utf-8')
+      .send('id_list_message=t-אירעה תקלה בקבלת נתוני השיחה. נסו שוב מאוחר יותר&');
+    return;
+  }
+  res.status(400).type('text/plain; charset=utf-8').send('Bad request');
+});
+
+const port = Number(process.env.PORT || 3000);
+app.listen(port, () => {
+  console.log(JSON.stringify({
+    ts: new Date().toISOString(),
+    app: 'minyan-ivr',
+    event: 'server.started',
+    port,
+    envPresence: {
+      YM_TOKEN: Boolean(process.env.YM_TOKEN),
+      GROQ_API_KEY: Boolean(process.env.GROQ_API_KEY),
+      DEBUG_KEY: Boolean(process.env.DEBUG_KEY)
+    },
+    config: { radiusKm: RADIUS_KM, maxResults: MAX_RESULTS }
+  }));
+});
