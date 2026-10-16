@@ -282,12 +282,12 @@ function addressLookupFor(transcript, req) {
 }
 
 const ask = (prompt, varName, file) =>
-  `read=t-${clean(prompt)}=${varName},,record,/1,${safeFilePart(file)},no,yes,no,1,20`;
+  `read=t-${clean(prompt)}=${varName},,record,/1,${safeFilePart(file)},no,yes,no,1,20&`;
 
 // Yemot's documented read schema: variable,yes,maxDigits,minDigits,timeout,Digits,yes&.
 // The explicit timeout field is required before Digits; only one digit is accepted.
 const askKey = (prompt, varName) =>
-  `read=t-${clean(prompt)}=${varName},yes,1,1,20,Digits,yes`;
+  `read=t-${clean(prompt)}=${varName},yes,1,1,20,Digits,yes&`;
 
 // ערך ההקלטה מימות עשוי להגיע כנתיב מלא או כשם קובץ בלבד.
 // בהקלטה שמורה לשלוחה /1, נתיב יחסי מפורש מתפרש ביחס לשלוחה זו.
