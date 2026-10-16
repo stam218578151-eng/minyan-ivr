@@ -301,7 +301,7 @@ const ask = (prompt, varName, file) =>
 // Yemot's documented read schema: variable,yes,maxDigits,minDigits,timeout,Digits,yes&.
 // The explicit timeout field is required before Digits; only one digit is accepted.
 const askKey = (prompt, varName) =>
-  `read=t-${cleanSpeechText(prompt)}=${varName},yes,1,1,20,Digits,yes&`;
+  `read=t-${cleanSpeechText(prompt)}=${varName},no,1,1,20,Digits,no&`;
 
 const MINYAN_PAGE_SIZE = 3;
 
