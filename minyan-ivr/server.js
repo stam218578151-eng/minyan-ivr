@@ -1,5 +1,5 @@
 import express from 'express';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { transcribe } from './stt.js';
 import { geocode, normalizeAddress } from './geocode.js';
 import { fetchMinyanim, fetchRaw } from './minyanim.js';
@@ -700,8 +700,10 @@ async function savedAreasRpc(action, callerKey, slot = null, areaName = null, ar
 }
 
 function callerKeyForPhone(phone) {
-  // The database stores a deterministic digest rather than the phone number itself.
-  return createHash('sha256').update('minyan-ivr-saved-area-v1:' + phone).digest('hex');
+  // Store a keyed digest, not a raw phone number or an easily enumerable plain hash.
+  const secret = process.env.SAVED_AREAS_API_SECRET;
+  if (!secret) throw new Error('Saved areas secret is not configured');
+  return createHmac('sha256', secret).update('minyan-ivr-saved-area-v1:' + phone).digest('hex');
 }
 
 const savedHandler = async (req, res) => {
@@ -798,7 +800,7 @@ const savedHandler = async (req, res) => {
         ));
       }
 
-      await savedAreasRpc('upsert', callerKey, slotToConfigure, transcript, transcript);
+      await savedAreasRpc('upsert', callerKey, slotToConfigure, transcript.slice(0, 40), transcript);
       emit(req, 'saved_area.saved', { slot: slotToConfigure, callerKeyHash: callerKey.slice(0, 12) });
       return res.send(say('האזור ' + slotToConfigure + ' נשמר בהצלחה. בשיחה הבאה תוכלו לבחור אותו משלוחה 2'));
     } catch (error) {
