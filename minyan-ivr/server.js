@@ -332,7 +332,7 @@ async function download(path, req) {
       statusText: response.statusText,
       reason: 'provider_http_error'
     });
-    throw new Error(\`download \${response.status}\`);
+    throw new Error('download ' + response.status);
   }
   const bytes = Buffer.from(await response.arrayBuffer());
   emit(req, 'recording.download.http_ok', {
