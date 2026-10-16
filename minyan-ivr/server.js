@@ -580,8 +580,8 @@ const ivrHandler = async (req, res) => {
 
     const sorted = sortMinyanim(list, sortMode);
     const actionNames = Object.keys(params)
-      .filter(name => /^pageAction\\d+$/i.test(name))
-      .sort((a, b) => Number(a.match(/\\d+/)?.[0] || 0) - Number(b.match(/\\d+/)?.[0] || 0));
+      .filter(name => /^pageAction\d+$/i.test(name))
+      .sort((a, b) => Number(a.match(/\d+/)?.[0] || 0) - Number(b.match(/\d+/)?.[0] || 0));
     const lastActionName = actionNames[actionNames.length - 1];
     const lastAction = lastActionName ? String(getParam(lastActionName) ?? '').trim() : '';
     if (lastAction === '2') {
@@ -696,8 +696,8 @@ const savedHandler = async (req, res) => {
 
     const sorted = sortMinyanim(list, sortMode);
     const actionNames = Object.keys(params)
-      .filter(name => /^savedPageAction\\d+$/i.test(name))
-      .sort((a, b) => Number(a.match(/\\d+/)?.[0] || 0) - Number(b.match(/\\d+/)?.[0] || 0));
+      .filter(name => /^savedPageAction\d+$/i.test(name))
+      .sort((a, b) => Number(a.match(/\d+/)?.[0] || 0) - Number(b.match(/\d+/)?.[0] || 0));
     const lastActionName = actionNames[actionNames.length - 1];
     if (lastActionName && String(getParam(lastActionName) ?? '').trim() === '2') {
       return res.send(say('סיימנו את רשימת המניינים באזור ' + area.name + '. תודה ולהתראות'));
