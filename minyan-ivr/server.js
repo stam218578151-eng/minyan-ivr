@@ -156,8 +156,8 @@ const cleanSpeechText = value => String(value ?? '')
   .normalize('NFKC')
   // Yemot's Text (t-) syntax uses dot and hyphen as control separators.
   // Allow only letters, numbers, combining marks, spaces and the colon in HH:MM.
-  .replace(/[^\\p{L}\\p{N}\\p{M}\\s:]/gu, ' ')
-  .replace(/\\s+/g, ' ')
+  .replace(/[^\p{L}\p{N}\p{M}\s:]/gu, ' ')
+  .replace(/\s+/g, ' ')
   .trim();
 
 const say = t => {
@@ -167,7 +167,7 @@ const say = t => {
   const maxSpeechCharacters = 200;
   const clipped = cleaned.length <= maxSpeechCharacters
     ? cleaned
-    : cleaned.slice(0, maxSpeechCharacters).replace(/\\s+\\S*$/, '').trim();
+    : cleaned.slice(0, maxSpeechCharacters).replace(/\s+\S*$/, '').trim();
   const response = `id_list_message=t-${clipped}&`;
   console.log('ivr response prepared', {
     command: 'id_list_message',
@@ -175,7 +175,7 @@ const say = t => {
     speechCharacters: clipped.length,
     bytes: Buffer.byteLength(response, 'utf8'),
     terminated: response.endsWith('&'),
-    forbiddenTtsDelimiters: /[.\\-&=,]/.test(clipped),
+    forbiddenTtsDelimiters: ['.', '-', '&', '=', ','].some(ch => clipped.includes(ch)),
     chainedActions: false
   });
   return response;
