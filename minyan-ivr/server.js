@@ -642,6 +642,95 @@ const ivrHandler = async (req, res) => {
 app.get('/ivr', ivrHandler);
 app.post('/ivr', ivrHandler);
 
+// שלוחה 2: שני אזורים שמורים המוגדרים בהגדרות Render.
+// משתני ההגדרה: SAVED_AREA_1_NAME / SAVED_AREA_1_ADDRESS,
+//               SAVED_AREA_2_NAME / SAVED_AREA_2_ADDRESS.
+function getSavedAreas() {
+  return [
+    { slot: '1', name: String(process.env.SAVED_AREA_1_NAME || '').trim(), address: String(process.env.SAVED_AREA_1_ADDRESS || '').trim() },
+    { slot: '2', name: String(process.env.SAVED_AREA_2_NAME || '').trim(), address: String(process.env.SAVED_AREA_2_ADDRESS || '').trim() }
+  ];
+}
+
+const savedHandler = async (req, res) => {
+  res.set('Content-Type', 'text/plain; charset=utf-8');
+  const params = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
+  const getParam = name => params[name] ?? params[Object.keys(params).find(k => k.toLowerCase() === name.toLowerCase())];
+  const areas = getSavedAreas();
+  const choice = String(getParam('savedAreaChoice') ?? '').trim();
+  const area = areas.find(item => item.slot === choice);
+
+  if (!choice) {
+    const configured = areas.filter(item => item.name && item.address);
+    if (!configured.length) {
+      return res.send(say('שלוחה 2 מוכנה לשני אזורים שמורים, אך הם עדיין לא הוגדרו. יש להגדיר את שמות האזורים והכתובות בהגדרות השירות'));
+    }
+    const prompt = configured.map(item => 'לאזור ' + item.name + ' הקישו ' + item.slot).join('. ');
+    return res.send(askKey(prompt, 'savedAreaChoice'));
+  }
+
+  if (!area || !area.name || !area.address) {
+    return res.send(say('האיזור שבחרתם עדיין לא הוגדר. יש להגדיר את שם האיזור והכתובת שלו בהגדרות השירות'));
+  }
+
+  try {
+    emit(req, 'saved_area.selected', { slot: area.slot, configured: true });
+    let pos;
+    const lookup = await addressLookupFor(area.address, req);
+    if (lookup.error) throw new Error(lookup.error);
+    pos = lookup.pos;
+    if (!pos) {
+      return res.send(say('לא הצלחתי לאתר את האיזור השמור ' + area.name + '. יש לבדוק את הכתובת בהגדרות השירות'));
+    }
+
+    const list = await fetchMinyanim(pos.lat, pos.lng, RADIUS_KM);
+    if (!list.length) return res.send(say('לא נמצאו מניינים באזור ' + area.name));
+
+    const sortMode = String(getParam('savedSortMode') ?? '').trim();
+    if (sortMode !== '1' && sortMode !== '2') {
+      return res.send(askKey(
+        'באזור ' + area.name + ' נמצאו ' + list.length + ' מניינים. להקראה לפי שעה הקישו 1. להקראה לפי בית כנסת הקישו 2',
+        'savedSortMode'
+      ));
+    }
+
+    const sorted = sortMinyanim(list, sortMode);
+    const actionNames = Object.keys(params)
+      .filter(name => /^savedPageAction\\d+$/i.test(name))
+      .sort((a, b) => Number(a.match(/\\d+/)?.[0] || 0) - Number(b.match(/\\d+/)?.[0] || 0));
+    const lastActionName = actionNames[actionNames.length - 1];
+    if (lastActionName && String(getParam(lastActionName) ?? '').trim() === '2') {
+      return res.send(say('סיימנו את רשימת המניינים באזור ' + area.name + '. תודה ולהתראות'));
+    }
+
+    const pageIndex = actionNames.filter(name => String(getParam(name) ?? '').trim() === '1').length;
+    const start = pageIndex * MINYAN_PAGE_SIZE;
+    const page = sorted.slice(start, start + MINYAN_PAGE_SIZE);
+    if (!page.length) return res.send(say('אין מניינים נוספים באזור ' + area.name));
+
+    let previousPlace = '';
+    const spoken = page.map((m, offset) => {
+      const text = describeMinyan(m, start + offset, sortMode, previousPlace);
+      previousPlace = m.place || 'בית כנסת לא ידוע';
+      return text;
+    }).join('. ');
+    if (start + page.length < sorted.length) {
+      return res.send(askKey(
+        'באזור ' + area.name + '. ' + spoken + '. להמשך הרשימה הקישו 1. לסיום הקישו 2',
+        'savedPageAction' + (pageIndex + 1)
+      ));
+    }
+    return res.send(say('באזור ' + area.name + '. ' + spoken + '. אלה כל המניינים שנמצאו'));
+  } catch (error) {
+    emit(req, 'saved_area.failure', { slot: area.slot, error: errorInfo(error) });
+    return res.send(say('אירעה שגיאה בחיפוש המניינים באזור השמור. נסו שוב מאוחר יותר'));
+  }
+};
+
+app.get('/saved', savedHandler);
+app.post('/saved', savedHandler);
+
+
 app.use((error, req, res, next) => {
   emit(req, 'http.middleware.failure', {
     stage: req.ivrStage ?? 'before_route_handler',
