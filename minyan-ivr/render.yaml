@@ -17,3 +17,11 @@ services:
         value: "2"
       - key: DEBUG_KEY
         sync: false
+      - key: SAVED_AREA_1_NAME
+        sync: false
+      - key: SAVED_AREA_1_ADDRESS
+        sync: false
+      - key: SAVED_AREA_2_NAME
+        sync: false
+      - key: SAVED_AREA_2_ADDRESS
+        sync: false
